@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+	<title>Depth VR Viewer</title>
+	<style>
+:root {
+	color-scheme: dark;
+	--bg: #000;
+	--pn: #14171c;
+	--fg: #e6e9ee;
+	--mut: #8a93a0;
+	--ac: #6fd0a8;
+	--ln: #262b33;
+	box-sizing: border-box;
+	padding-top: env(safe-area-inset-top, 0px);
+	padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+html {
+	scroll-padding-top: env(safe-area-inset-top, 0px);
+}
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+	font:
+		15px/1.4 system-ui,
+		sans-serif;
+}
+.ui {
+	max-width: 640px;
+	margin: 0 auto;
+	padding: 12px;
+}
+h1 {
+	font: 600 18px system-ui;
+	margin: 4px 0 10px;
+}
+.row {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	margin: 8px 0;
+}
+button,
+select,
+input[type="number"] {
+	background: var(--pn);
+	color: var(--fg);
+	border: 1px solid var(--ln);
+	border-radius: 8px;
+	padding: 10px 14px;
+	font: inherit;
+}
+button.main {
+	background: var(--ac);
+	color: #04110b;
+	border-color: var(--ac);
+	font-weight: 600;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+	outline: 2px solid var(--ac);
+	outline-offset: 2px;
+}
+canvas {
+	display: block;
+	width: 100%;
+	aspect-ratio: 2/1;
+	background: #000;
+	border: 1px solid var(--ln);
+	border-radius: 8px;
+}
+body.vr canvas {
+	position: fixed;
+	inset: 0;
+	width: 100vw;
+	height: 100vh;
+	aspect-ratio: auto;
+	border: 0;
+	border-radius: 0;
+	z-index: 9;
+}
+body.vr .ui {
+	visibility: hidden;
+}
+.st {
+	color: var(--mut);
+	font-size: 13px;
+	min-height: 2.6em;
+}
+details {
+	background: var(--pn);
+	border: 1px solid var(--ln);
+	border-radius: 8px;
+	margin: 8px 0;
+	padding: 6px 12px;
+}
+summary {
+	cursor: pointer;
+	padding: 6px 0;
+	font-weight: 600;
+}
+.ctl {
+	display: grid;
+	grid-template-columns: 1fr 64px;
+	gap: 2px 8px;
+	margin: 8px 0;
+}
+.ctl label {
+	grid-column: 1/3;
+	font-size: 13px;
+	color: var(--mut);
+}
+.ctl input[type="range"] {
+	width: 100%;
+	accent-color: var(--ac);
+}
+.ctl output {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+.chk {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	margin: 8px 0;
+}
+pre {
+	background: #000;
+	border: 1px solid var(--ln);
+	border-radius: 8px;
+	padding: 8px;
+	font-size: 12px;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	max-height: 9em;
+	overflow-y: auto;
+}
+	</style>
+</head>
+
+<body>
+	<div class="ui">
+		<h1>Depth VR Viewer</h1>
+		<canvas id="cv"></canvas>
+		<div class="st" id="st">Not connected.</div>
+		<div class="row">
+			<button class="main" id="bConn">Connect sensor</button>
+			<button id="bDemo">Demo data</button>
+			<button class="main" id="bVR">Enter VR</button>
+		</div>
+		<details open>
+			<summary>Sensor input</summary>
+			<div class="row">
+				<label>Baud <input type="number" id="baud" value="115200" style="width: 7em" /></label>
+				<label>Units
+					<select id="units">
+						<option value="1">mm</option>
+						<option value="10">cm</option>
+						<option value="1000">m</option>
+					</select></label>
+			</div>
+			<div class="chk"><input type="checkbox" id="flipH" /><label for="flipH">Flip left/right</label></div>
+			<div class="chk"><input type="checkbox" id="flipV" /><label for="flipV">Flip up/down</label></div>
+			<div class="chk">
+				<input type="checkbox" id="swap" /><label for="swap">Swap rows and columns (sensor turned
+					sideways)</label>
+			</div>
+			<div class="chk">
+				<input type="checkbox" id="invert" /><label for="invert">Invert (far is bright)</label>
+			</div>
+		</details>
+		<details open>
+			<summary>Haptic simulation</summary>
+			<div id="sim"></div>
+		</details>
+		<details>
+			<summary>Headset layout and lens warp</summary>
+			<div class="chk">
+				<input type="checkbox" id="test" /><label for="test">Show test grid (all cells on)</label>
+			</div>
+			<div class="chk">
+				<input type="checkbox" id="smooth" /><label for="smooth">Smooth edges between cells</label>
+			</div>
+			<div id="lay"></div>
+		</details>
+		<details>
+			<summary>Raw serial log</summary>
+			<pre id="log">(nothing yet)</pre>
+		</details>
+		<p class="st">In VR: double-tap the screen to exit. Settings save on this phone.</p>
+	</div>
+	<script>
+const $ = (s) => document.querySelector(s);
+const DEF = {
+	baud: 115200,
+	units: 1,
+	near: 300,
+	far: 2000,
+	levels: 0,
+	res: 8,
+	blur: 0,
+	rate: 60,
+	lag: 0,
+	tau: 0,
+	noise: 0,
+	size: 0.8,
+	shift: 0,
+	voff: 0,
+	k1: 0,
+	k2: 0,
+	gap: 0.06,
+	smooth: 0,
+	invert: 0,
+	flipH: 0,
+	flipV: 0,
+	swap: 0,
+	test: 0,
+};
+let S = { ...DEF };
+try {
+	Object.assign(S, JSON.parse(localStorage.getItem("dvr") || "{}"));
+} catch (e) { }
+const save = () => {
+	try {
+		localStorage.setItem("dvr", JSON.stringify(S));
+	} catch (e) { }
+};
+const SIM = [
+	["near", "Near limit (mm)", 50, 3000, 10],
+	["far", "Far limit (mm)", 200, 3500, 10],
+	["levels", "Intensity levels (0 = continuous)", 0, 16, 1],
+	["res", "Grid resolution (cells per side)", 1, 8, 1],
+	["blur", "Spread between cells (radius)", 0, 3, 1],
+	["rate", "Update rate (Hz, 60 = max)", 1, 60, 1],
+	["lag", "Lag (ms)", 0, 1000, 10],
+	["tau", "Adaptation fade (s, 0 = off)", 0, 10, 0.5],
+	["noise", "Noise", 0, 0.5, 0.01],
+];
+const LAY = [
+	["size", "Image size", 0.2, 1.2, 0.01],
+	["shift", "Eye spacing shift", -0.15, 0.15, 0.005],
+	["voff", "Vertical offset", -0.3, 0.3, 0.005],
+	["k1", "Lens warp k1", -0.5, 1, 0.01],
+	["k2", "Lens warp k2", -0.5, 1, 0.01],
+	["gap", "Cell gap", 0, 0.3, 0.01],
+];
+function build(list, host) {
+	for (const [k, lab, mn, mx, st] of list) {
+		const d = document.createElement("div");
+		d.className = "ctl";
+		d.innerHTML = `<label for="r_${k}">${lab}</label><input type="range" id="r_${k}" min="${mn}" max="${mx}" step="${st}"><output></output>`;
+		const r = d.querySelector("input"),
+			o = d.querySelector("output");
+		r.value = S[k];
+		const show = () => {
+			o.textContent = k == "rate" && S[k] >= 60 ? "max" : k == "levels" && S[k] < 2 ? "∞" : S[k];
+		};
+		show();
+		r.oninput = () => {
+			S[k] = +r.value;
+			show();
+			save();
+		};
+		$(host).appendChild(d);
+	}
+}
+build(SIM, "#sim");
+build(LAY, "#lay");
+for (const k of ["smooth", "invert", "flipH", "flipV", "swap", "test"]) {
+	const e = $("#" + k);
+	e.checked = !!S[k];
+	e.onchange = () => {
+		S[k] = e.checked ? 1 : 0;
+		save();
+	};
+}
+$("#baud").value = S.baud;
+$("#baud").onchange = (e) => {
+	S.baud = +e.target.value || 115200;
+	save();
+};
+$("#units").value = S.units;
+$("#units").onchange = (e) => {
+	S.units = +e.target.value;
+	save();
+};
+
+/* ---------- data in ---------- */
+const hist = [];
+let rows = [],
+	frames = 0,
+	fps = 0,
+	lastRange = "",
+	logLines = [],
+	mode = "none",
+	port = null,
+	reader = null,
+	demoTimer = null;
+function pushFrame(d) {
+	hist.push({ t: performance.now(), d });
+	if (hist.length > 200) hist.shift();
+	frames++;
+	let lo = 1e9,
+		hi = -1e9;
+	for (const v of d) {
+		if (v > 0) {
+			lo = Math.min(lo, v);
+			hi = Math.max(hi, v);
+		}
+	}
+	lastRange = hi > 0 ? `${lo | 0}–${hi | 0} mm` : "no valid cells";
+}
+const toD = (a) =>
+	Float32Array.from(a, (v) => {
+		v = +v;
+		return v <= 0 || v >= 4000 ? 0 : v * S.units;
+	});
+function handleLine(line) {
+	logLines.push(line.slice(0, 120));
+	if (logLines.length > 10) logLines.shift();
+	let idx = -1;
+	const m = line.match(/^\s*(?:line\s*)?y\s*(\d+)\s*[:=]/i);
+	if (m) {
+		idx = +m[1];
+		line = line.slice(m[0].length);
+	}
+	const n = line.match(/-?\d+(?:\.\d+)?/g);
+	if (!n) return;
+	if (n.length === 64 && idx < 0) {
+		pushFrame(toD(n));
+		return;
+	}
+	if (n.length !== 8) {
+		rows = [];
+		return;
+	}
+	if (idx < 0) idx = rows.length;
+	if (idx === 0) rows = [];
+	rows[idx] = n;
+	if (idx === 7 && Array.from(rows).every(Boolean)) {
+		pushFrame(toD(rows.flat()));
+		rows = [];
+	}
+}
+async function connect() {
+	if (!("serial" in navigator)) {
+		$("#st").textContent = "Web Serial is not available in this browser.";
+		return;
+	}
+	try {
+		stopDemo();
+		port = await navigator.serial.requestPort();
+		await port.open({ baudRate: S.baud || 115200 });
+		mode = "serial";
+		readLoop();
+	} catch (e) {
+		$("#st").textContent = "Could not connect: " + e.message;
+	}
+}
+async function readLoop() {
+	const dec = new TextDecoder();
+	let buf = "";
+	try {
+		reader = port.readable.getReader();
+		while (true) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			buf += dec.decode(value, { stream: true });
+			let i;
+			while ((i = buf.indexOf("\n")) >= 0) {
+				handleLine(buf.slice(0, i).replace(/\r/g, ""));
+				buf = buf.slice(i + 1);
+			}
+			if (buf.length > 4000) buf = "";
+		}
+	} catch (e) {
+		$("#st").textContent = "Read error: " + e.message;
+	} finally {
+		try {
+			reader.releaseLock();
+		} catch (e) { }
+		try {
+			await port.close();
+		} catch (e) { }
+		port = null;
+		reader = null;
+		if (mode == "serial") mode = "none";
+	}
+}
+async function disconnect() {
+	if (reader)
+		try {
+			await reader.cancel();
+		} catch (e) { }
+}
+function startDemo() {
+	stopDemo();
+	mode = "demo";
+	let t = 0;
+	demoTimer = setInterval(() => {
+		t += 0.07;
+		const d = new Float32Array(64);
+		const bx = 3.5 + 3 * Math.sin(t),
+			by = 3.5 + 2 * Math.cos(t * 0.7),
+			bd = 700 + 350 * Math.sin(t * 1.3);
+		for (let y = 0; y < 8; y++)
+			for (let x = 0; x < 8; x++) {
+				let v = 2800 - y * 60;
+				if (x < 2) v = 1400;
+				if (Math.hypot(x - bx, y - by) < 1.9) v = bd;
+				d[y * 8 + x] = v;
+			}
+		pushFrame(d);
+	}, 66);
+}
+function stopDemo() {
+	if (demoTimer) {
+		clearInterval(demoTimer);
+		demoTimer = null;
+	}
+	if (mode == "demo") mode = "none";
+}
+$("#bConn").onclick = () => (port ? disconnect() : connect());
+$("#bDemo").onclick = () => (demoTimer ? stopDemo() : startDemo());
+
+/* ---------- processing ---------- */
+const ad = new Float32Array(64);
+function process(d, dt) {
+	if (S.test) return new Uint8Array(64).fill(255);
+	let t = new Float32Array(64);
+	const span = Math.max(1, S.far - S.near);
+	for (let y = 0; y < 8; y++)
+		for (let x = 0; x < 8; x++) {
+			let sx = S.flipH ? 7 - x : x,
+				sy = S.flipV ? 7 - y : y;
+			if (S.swap) [sx, sy] = [sy, sx];
+			const v = d[sy * 8 + sx];
+			let a = 0;
+			if (v > 0) {
+				a = Math.min(1, Math.max(0, (S.far - v) / span));
+				if (S.invert) a = 1 - a;
+			}
+			t[y * 8 + x] = a;
+		}
+	const n = S.res;
+	if (n < 8) {
+		const sum = new Float32Array(64),
+			cnt = new Float32Array(64),
+			K = (y, x) => (((y * n) / 8) | 0) * n + (((x * n) / 8) | 0);
+		for (let y = 0; y < 8; y++)
+			for (let x = 0; x < 8; x++) {
+				const k = K(y, x);
+				sum[k] += t[y * 8 + x];
+				cnt[k]++;
+			}
+		for (let y = 0; y < 8; y++)
+			for (let x = 0; x < 8; x++) {
+				const k = K(y, x);
+				t[y * 8 + x] = sum[k] / cnt[k];
+			}
+	}
+	if (S.blur > 0) {
+		const r = S.blur,
+			o = new Float32Array(64);
+		for (let y = 0; y < 8; y++)
+			for (let x = 0; x < 8; x++) {
+				let s = 0,
+					c = 0;
+				for (let j = -r; j <= r; j++)
+					for (let i = -r; i <= r; i++) {
+						const yy = y + j,
+							xx = x + i;
+						if (yy >= 0 && yy < 8 && xx >= 0 && xx < 8) {
+							s += t[yy * 8 + xx];
+							c++;
+						}
+					}
+				o[y * 8 + x] = s / c;
+			}
+		t = o;
+	}
+	const out = new Uint8Array(64);
+	for (let i = 0; i < 64; i++) {
+		let v = t[i];
+		if (S.noise > 0) v += (Math.random() - 0.5) * 2 * S.noise;
+		v = Math.min(1, Math.max(0, v));
+		if (S.levels >= 2) v = Math.round(v * (S.levels - 1)) / (S.levels - 1);
+		if (S.tau > 0) {
+			ad[i] = Math.min(0.95, Math.max(0, ad[i] + (v > 0.05 ? dt / S.tau : -dt / (S.tau * 0.5))));
+			v *= 1 - ad[i];
+		} else ad[i] = 0;
+		out[i] = Math.round(v * 255);
+	}
+	return out;
+}
+
+/* ---------- WebGL ---------- */
+const cv = $("#cv"),
+	gl = cv.getContext("webgl");
+const vs = "attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}";
+const fs = `precision mediump float;uniform vec2 res;uniform sampler2D tex;uniform float k1,k2,size,shift,voff,gap;
+void main(){vec2 f=gl_FragCoord.xy;float hw=res.x*.5;bool R=f.x>hw;float ex=f.x-(R?hw:0.);
+vec2 c=vec2(hw*.5+(R?-1.:1.)*shift*res.x,res.y*.5+voff*res.y);float hs=res.y*size*.5;
+vec2 p=(vec2(ex,f.y)-c)/hs;float r2=dot(p,p);vec2 q=p*(1.+k1*r2+k2*r2*r2);vec2 uv=vec2(q.x*.5+.5,.5-q.y*.5);float v=0.;
+if(uv.x>=0.&&uv.x<=1.&&uv.y>=0.&&uv.y<=1.){v=texture2D(tex,uv).r;vec2 g=abs(fract(uv*8.)-.5)*2.;v*=1.-step(1.-gap,max(g.x,g.y));}
+gl_FragColor=vec4(vec3(v),1.);}`;
+function sh(t, s) {
+	const o = gl.createShader(t);
+	gl.shaderSource(o, s);
+	gl.compileShader(o);
+	return o;
+}
+const pr = gl.createProgram();
+gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs));
+gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs));
+gl.linkProgram(pr);
+gl.useProgram(pr);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(pr, "a");
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+let img = new Uint8Array(64);
+const U = (n) => gl.getUniformLocation(pr, n);
+function resize() {
+	const dpr = Math.min(2, window.devicePixelRatio || 1);
+	cv.width = Math.round(cv.clientWidth * dpr);
+	cv.height = Math.round(cv.clientHeight * dpr);
+	gl.viewport(0, 0, cv.width, cv.height);
+}
+addEventListener("resize", resize);
+function draw() {
+	const f = S.smooth ? gl.LINEAR : gl.NEAREST;
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+	gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, 8, 8, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, img);
+	gl.uniform2f(U("res"), cv.width, cv.height);
+	for (const k of ["k1", "k2", "size", "shift", "voff", "gap"]) gl.uniform1f(U(k), S[k]);
+	gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+let lastUp = 0;
+function loop(now) {
+	requestAnimationFrame(loop);
+	const target = now - S.lag;
+	let fr = null;
+	for (let i = hist.length - 1; i >= 0; i--)
+		if (hist[i].t <= target) {
+			fr = hist[i];
+			break;
+		}
+	const gap = S.rate >= 60 ? 0 : 1000 / S.rate;
+	if ((fr || S.test) && now - lastUp >= gap) {
+		img = process(fr ? fr.d : new Float32Array(64), Math.min(0.5, (now - lastUp) / 1000));
+		lastUp = now;
+	}
+	draw();
+}
+
+/* ---------- status ---------- */
+let fc = 0,
+	ft = performance.now();
+setInterval(() => {
+	const n = performance.now();
+	fps = ((frames - fc) * 1000) / (n - ft);
+	fc = frames;
+	ft = n;
+	const m =
+		mode == "serial" ? "Connected to sensor" : mode == "demo" ? "Showing demo data" : "Not connected";
+	$("#st").textContent =
+		`${m}. ${mode != "none" ? fps.toFixed(1) + " frames/s. Depth " + lastRange + "." : "Press Connect sensor or Demo data."}`;
+	$("#bConn").textContent = port ? "Disconnect" : "Connect sensor";
+	$("#bDemo").textContent = demoTimer ? "Stop demo" : "Demo data";
+	$("#log").textContent = logLines.length ? logLines.join("\n") : "(nothing yet)";
+}, 500);
+
+/* ---------- VR mode ---------- */
+let wake = null,
+	lastTap = 0;
+async function enterVR() {
+	document.body.classList.add("vr");
+	try {
+		await document.documentElement.requestFullscreen();
+	} catch (e) { }
+	try {
+		await screen.orientation.lock("landscape");
+	} catch (e) { }
+	try {
+		wake = await navigator.wakeLock.request("screen");
+	} catch (e) { }
+	setTimeout(resize, 150);
+}
+function exitVR() {
+	document.body.classList.remove("vr");
+	if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
+	try {
+		screen.orientation.unlock();
+	} catch (e) { }
+	if (wake) {
+		wake.release().catch(() => { });
+		wake = null;
+	}
+	setTimeout(resize, 150);
+}
+$("#bVR").onclick = enterVR;
+document.addEventListener("fullscreenchange", () => {
+	if (!document.fullscreenElement && document.body.classList.contains("vr")) exitVR();
+});
+cv.addEventListener("pointerup", () => {
+	const n = Date.now();
+	if (document.body.classList.contains("vr") && n - lastTap < 400) exitVR();
+	lastTap = n;
+});
+resize();
+requestAnimationFrame(loop);
+	</script>
+</body>
+
+</html>
