@@ -1,6 +1,5 @@
 <!doctype html>
 <html lang="en">
-
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -83,6 +82,7 @@ body.vr canvas {
 	border: 0;
 	border-radius: 0;
 	z-index: 9;
+	visibility: visible;
 }
 body.vr .ui {
 	visibility: hidden;
@@ -142,7 +142,6 @@ pre {
 }
 	</style>
 </head>
-
 <body>
 	<div class="ui">
 		<h1>Depth VR Viewer</h1>
@@ -157,22 +156,19 @@ pre {
 			<summary>Sensor input</summary>
 			<div class="row">
 				<label>Baud <input type="number" id="baud" value="115200" style="width: 7em" /></label>
-				<label>Units
+				<label>
+					Units
 					<select id="units">
 						<option value="1">mm</option>
 						<option value="10">cm</option>
 						<option value="1000">m</option>
-					</select></label>
+					</select>
+				</label>
 			</div>
 			<div class="chk"><input type="checkbox" id="flipH" /><label for="flipH">Flip left/right</label></div>
 			<div class="chk"><input type="checkbox" id="flipV" /><label for="flipV">Flip up/down</label></div>
-			<div class="chk">
-				<input type="checkbox" id="swap" /><label for="swap">Swap rows and columns (sensor turned
-					sideways)</label>
-			</div>
-			<div class="chk">
-				<input type="checkbox" id="invert" /><label for="invert">Invert (far is bright)</label>
-			</div>
+			<div class="chk"><input type="checkbox" id="swap" /><label for="swap">Swap rows and columns (sensor turned sideways)</label></div>
+			<div class="chk"><input type="checkbox" id="invert" /><label for="invert">Invert (far is bright)</label></div>
 		</details>
 		<details open>
 			<summary>Haptic simulation</summary>
@@ -621,9 +617,9 @@ cv.addEventListener("pointerup", () => {
 	if (document.body.classList.contains("vr") && n - lastTap < 400) exitVR();
 	lastTap = n;
 });
+new ResizeObserver(resize).observe(cv);
 resize();
 requestAnimationFrame(loop);
 	</script>
 </body>
-
 </html>
