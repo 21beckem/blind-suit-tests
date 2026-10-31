@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import queue
 import socket
 import threading
@@ -13,8 +14,8 @@ HOST = "127.0.0.1"
 PORT = 5000
 MODEL_NAME = "LiheYoung/depth-anything-small-hf"
 PROCESS_IMAGE_SIZE = 252
-OUTPUT_WIDTH = 252
-OUTPUT_HEIGHT = 252
+OUTPUT_WIDTH = 8
+OUTPUT_HEIGHT = 8
 DISPLAY_DEPTH_ALONGSIDE_CAMERA = True
 DISPLAY_AT_INPUT_RESOLUTION = True
 
@@ -92,6 +93,18 @@ def accept_websocket(conn):
         f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
     )
     conn.sendall(response.encode())
+
+
+def send_websocket_text(conn, message):
+    payload = message.encode("utf-8")
+    length = len(payload)
+    if length < 126:
+        header = bytes([0x81, length])
+    elif length < 65536:
+        header = bytes([0x81, 126]) + length.to_bytes(2, "big")
+    else:
+        header = bytes([0x81, 127]) + length.to_bytes(8, "big")
+    conn.sendall(header + payload)
 
 
 def crop_to_aspect_ratio(image, aspect_ratio):
@@ -177,10 +190,19 @@ try:
             outputs, target_sizes=[cropped_size]
         )[0]["predicted_depth"]
         depth = depth.cpu().numpy()
-        depth = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(
-            np.uint8
+        depth_min = depth.min()
+        depth_max = depth.max()
+        if depth_max > depth_min:
+            depth = (depth - depth_min) / (depth_max - depth_min)
+        else:
+            depth = np.zeros_like(depth)
+        depth = cv2.resize(
+            depth, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_AREA
         )
-        depth = cv2.applyColorMap(depth, cv2.COLORMAP_INFERNO)
+        send_websocket_text(conn, json.dumps(depth.tolist(), separators=(",", ":")))
+        depth = cv2.applyColorMap(
+            np.round(depth * 255).astype(np.uint8), cv2.COLORMAP_INFERNO
+        )
         image = cv2.resize(image, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
         depth = cv2.resize(depth, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
         if DISPLAY_AT_INPUT_RESOLUTION:

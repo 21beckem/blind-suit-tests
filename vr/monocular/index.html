@@ -87,6 +87,17 @@
       try {
         socket = new WebSocket("ws://127.0.0.1:5000");
         socket.binaryType = "arraybuffer";
+        socket.onmessage = (event) => {
+          if (typeof event.data !== "string") return;
+          let data;
+          try {
+            data = JSON.parse(event.data);
+          } catch {
+            console.error('Invalid JSON:', event.data);
+            return;
+          }
+          VR.paint(data);
+        };
         socket.onopen = () => {
           const canvas = document.createElement("canvas");
           const context = canvas.getContext("2d");

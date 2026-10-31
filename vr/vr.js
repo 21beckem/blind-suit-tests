@@ -19,7 +19,7 @@
     const KEY = 'vrjs.config.v1';
     const DEFAULTS = {
         levels: 0, res: 0, blur: 0, rate: 60, lag: 0, tau: 0, noise: 0,
-        size: 0.7, shift: 0.06, voff: 0, k1: 0.02, k2: 0.02, gap: 0.06,
+        size: 0.7, shift: 0.06, voff: 0, k1: 0.01, k2: 0.01, gap: 0.06,
         smooth: false, flipH: false, flipV: false, swap: false, test: false,
         rotate: true, rotFlip: false
     };
