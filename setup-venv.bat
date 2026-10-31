@@ -1,4 +1,4 @@
 python -m venv .venv
 call .venv\Scripts\activate
 
-pip install opencv-python
+pip install opencv-python pillow torch transformers
