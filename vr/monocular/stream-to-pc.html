@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phone Camera</title>
+  <style>
+    body { font: 16px sans-serif; margin: 20px; }
+    video { display: block; max-width: 100%; margin-top: 16px; }
+    button, select { font: inherit; margin: 4px 0; padding: 6px; }
+  </style>
+</head>
+<body>
+  <select id="camera" aria-label="Camera"></select>
+  <button id="start">Start</button>
+  <video id="preview" autoplay playsinline></video>
+
+  <script>
+    const camera = document.getElementById("camera");
+    const start = document.getElementById("start");
+    const preview = document.getElementById("preview");
+    const savedCamera = "phone-camera-device";
+    let stream;
+    let socket;
+    let timer;
+    let retryTimer;
+    let streaming = false;
+
+    async function listCameras() {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter((device) => device.kind === "videoinput");
+      camera.replaceChildren(...cameras.map((device, index) => {
+        const option = document.createElement("option");
+        option.value = device.deviceId;
+        option.textContent = device.label || `Camera ${index + 1}`;
+        return option;
+      }));
+      const previous = localStorage.getItem(savedCamera);
+      if (cameras.some((device) => device.deviceId === previous)) {
+        camera.value = previous;
+      }
+    }
+
+    async function chooseCamera() {
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: camera.value ? { exact: camera.value } : undefined }
+      });
+      preview.srcObject = stream;
+      localStorage.setItem(savedCamera, camera.value);
+      await listCameras();
+    }
+
+    function sendFrame(canvas, context) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      canvas.width = preview.videoWidth;
+      canvas.height = preview.videoHeight;
+      context.drawImage(preview, 0, 0);
+      canvas.toBlob((blob) => {
+        if (blob && socket.readyState === WebSocket.OPEN) socket.send(blob);
+      }, "image/jpeg", 0.75);
+    }
+
+    function retryConnection() {
+      if (!streaming || retryTimer) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        connect();
+      }, 1000);
+    }
+
+    function connect() {
+      if (!streaming) return;
+      try {
+        socket = new WebSocket("ws://127.0.0.1:5000");
+        socket.binaryType = "arraybuffer";
+        socket.onopen = () => {
+          const canvas = document.createElement("canvas");
+          const context = canvas.getContext("2d");
+          timer = setInterval(() => sendFrame(canvas, context), 100);
+          start.textContent = "Streaming";
+        };
+        socket.onerror = () => socket.close();
+        socket.onclose = () => {
+          clearInterval(timer);
+          timer = undefined;
+          socket = undefined;
+          start.textContent = "Retrying...";
+          retryConnection();
+        };
+      } catch {
+        retryConnection();
+      }
+    }
+
+    async function startStream() {
+      streaming = true;
+      start.textContent = "Connecting...";
+      await chooseCamera();
+      connect();
+    }
+
+    function stopStream() {
+      streaming = false;
+      clearInterval(timer);
+      clearTimeout(retryTimer);
+      timer = undefined;
+      retryTimer = undefined;
+      if (socket) socket.close();
+      socket = undefined;
+      start.textContent = "Start";
+    }
+
+    camera.addEventListener("change", () => {
+      localStorage.setItem(savedCamera, camera.value);
+      if (stream) chooseCamera().catch((error) => alert(error.message));
+    });
+    start.addEventListener("click", () => {
+      if (streaming) {
+        stopStream();
+        return;
+      }
+      startStream().catch((error) => {
+        streaming = false;
+        start.textContent = "Start";
+        alert(error.message);
+      });
+    });
+    listCameras().catch((error) => alert(error.message));
+  </script>
+</body>
+</html>
