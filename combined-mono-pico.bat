@@ -6,4 +6,4 @@ if errorlevel 1 (
     exit /b 1
 )
 
-"%~dp0.venv\Scripts\python.exe" "%~dp0vr\mono-pico\combined-feed.py"
+"%~dp0.venv\Scripts\python.exe" "%~dp0vr\combined-mono-pico\combined-feed.py"

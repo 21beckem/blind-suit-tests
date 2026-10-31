@@ -4,11 +4,13 @@ import json
 import queue
 import socket
 import threading
+import time
 
 import cv2
 import numpy as np
 import torch
 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+import pico
 
 HOST = "127.0.0.1"
 PORT = 5000
@@ -18,6 +20,14 @@ OUTPUT_WIDTH = 8
 OUTPUT_HEIGHT = 8
 DISPLAY_DEPTH_ALONGSIDE_CAMERA = True
 DISPLAY_AT_INPUT_RESOLUTION = True
+PICO_PORT = "COM12"
+PICO_BAUD = 115200
+PICO_VALID_DISTANCE_MAX_MM = 3500
+PICO_MODE2_VALID_FRACTION = 0.01
+PICO_DATA_TIMEOUT_SECONDS = 2.0
+PICO_COMBINATION_MODE = "blend"  # "fill" or "blend"
+PICO_WEIGHT = 0.90
+MODE1_MARKER = np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=np.float32)
 
 OUTPUT_ASPECT_RATIO = OUTPUT_WIDTH / OUTPUT_HEIGHT
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -120,6 +130,66 @@ def crop_to_aspect_ratio(image, aspect_ratio):
     return image[top:top + cropped_height, :]
 
 
+def normalize_depth(depth):
+    depth_min = depth.min()
+    depth_max = depth.max()
+    if depth_max > depth_min:
+        return (depth - depth_min) / (depth_max - depth_min)
+    return np.zeros_like(depth)
+
+
+def map_pico_depth(pico_grid):
+    """Map the complete 0-3500 mm Pico range to 1.0-0.3."""
+    mapped = 1.0 - (
+        np.asarray(pico_grid, dtype=np.float32)
+        / PICO_VALID_DISTANCE_MAX_MM
+    ) * 0.7
+    return np.clip(mapped, 0.3, 1.0)
+
+
+def fuse_depth(depth, pico_grid, pico_timestamp, now=None):
+    """Return the fused grid and whether it is in Pico-backed Mode 2."""
+    if now is None:
+        now = time.monotonic()
+
+    depth = np.asarray(depth, dtype=np.float32)
+    is_fresh = (
+        pico_grid is not None
+        and pico_timestamp is not None
+        and now - pico_timestamp <= PICO_DATA_TIMEOUT_SECONDS
+    )
+    if not is_fresh:
+        depth[0] = MODE1_MARKER
+        return depth, False
+
+    pico_grid = np.asarray(pico_grid, dtype=np.float32)
+    valid = (
+        np.isfinite(pico_grid)
+        & (pico_grid >= 0)
+        & (pico_grid < PICO_VALID_DISTANCE_MAX_MM)
+    )
+    required_tiles = int(np.ceil(depth.size * PICO_MODE2_VALID_FRACTION))
+    if int(valid.sum()) < required_tiles:
+        depth[0] = MODE1_MARKER
+        return depth, False
+
+    depth_mapped = 0.3 + (depth * 0.7)
+    pico_mapped = map_pico_depth(pico_grid)
+    if PICO_COMBINATION_MODE == "fill":
+        fused = np.where(valid, pico_mapped, depth_mapped)
+    elif PICO_COMBINATION_MODE == "blend":
+        blended = (
+            PICO_WEIGHT * pico_mapped
+            + (1.0 - PICO_WEIGHT) * depth_mapped
+        )
+        fused = np.where(valid, blended, depth_mapped)
+    else:
+        raise ValueError(
+            "PICO_COMBINATION_MODE must be 'fill' or 'blend'"
+        )
+    return fused.astype(np.float32), True
+
+
 def receive_frames(conn, frame_queue):
     while True:
         frame = read_websocket_frame(conn)
@@ -190,18 +260,24 @@ try:
             outputs, target_sizes=[cropped_size]
         )[0]["predicted_depth"]
         depth = depth.cpu().numpy()
-        depth_min = depth.min()
-        depth_max = depth.max()
-        if depth_max > depth_min:
-            depth = (depth - depth_min) / (depth_max - depth_min)
-        else:
-            depth = np.zeros_like(depth)
         depth = cv2.resize(
-            depth, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_AREA
+            normalize_depth(depth),
+            (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+            interpolation=cv2.INTER_AREA,
         )
-        send_websocket_text(conn, json.dumps(depth.tolist(), separators=(",", ":")))
+        pico_grid = pico.read(PICO_PORT, PICO_BAUD)
+        fused_depth, mode2 = fuse_depth(
+            depth,
+            pico_grid,
+            pico.last_update_time(),
+        )
+        send_websocket_text(
+            conn,
+            json.dumps(fused_depth.tolist(), separators=(",", ":")),
+        )
         depth = cv2.applyColorMap(
-            np.round(depth * 255).astype(np.uint8), cv2.COLORMAP_INFERNO
+            np.round(fused_depth * 255).astype(np.uint8),
+            cv2.COLORMAP_INFERNO,
         )
         image = cv2.resize(image, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
         depth = cv2.resize(depth, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
@@ -218,7 +294,8 @@ try:
             display = np.hstack((image, depth))
         else:
             display = depth
-        cv2.imshow("Live Phone Camera Feed - Depth Anything", display)
+        mode_name = "Pico depth" if mode2 else "DepthAnything image"
+        cv2.imshow(f"Live Phone Camera Feed - {mode_name}", display)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 finally:

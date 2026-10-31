@@ -1,4 +1,5 @@
 import argparse
+import time
 from pprint import pprint
 from threading import Lock, Thread
 
@@ -8,12 +9,13 @@ _connection = None
 _buffer = b""
 _rows = {}
 _latest = None
+_latest_timestamp = None
 _lock = Lock()
 _reader_thread = None
 
 
 def _read_serial(port, baud):
-	global _connection, _buffer, _rows, _latest
+	global _connection, _buffer, _rows, _latest, _latest_timestamp
 
 	_connection = Serial(port, baud, timeout=None)
 	while True:
@@ -36,6 +38,7 @@ def _read_serial(port, baud):
 			if len(_rows) == 8:
 				with _lock:
 					_latest = [_rows[index][:] for index in range(8)]
+					_latest_timestamp = time.monotonic()
 				_rows.clear()
 
 
@@ -49,6 +52,12 @@ def read(port="COM12", baud=115200):
 
 	with _lock:
 		return None if _latest is None else [row[:] for row in _latest]
+
+
+def last_update_time():
+	"""Return the monotonic time of the most recent complete array."""
+	with _lock:
+		return _latest_timestamp
 
 
 def main():
