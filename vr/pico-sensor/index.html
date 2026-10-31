@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Depth Sensor VR Test</title>
+    <style>
+body {
+    margin: 0;
+    background: #f1f4f9;
+    color: #1d2330;
+    font: 15px/1.4 system-ui, sans-serif
+}
+
+.wrap {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 12px 12px 80px
+}
+
+h1 {
+    font-size: 19px;
+    margin: 6px 0 12px
+}
+
+.card {
+    background: #fff;
+    border: 1px solid #d8dde6;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin: 10px 0
+}
+
+.row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 8px 0;
+    align-items: center
+}
+
+button,
+select,
+input[type=number] {
+    font: inherit;
+    background: #fff;
+    color: #1d2330;
+    border: 1px solid #c5ccd8;
+    border-radius: 8px;
+    padding: 9px 14px
+}
+
+button.main {
+    background: #1f7a5c;
+    color: #fff;
+    border-color: #1f7a5c;
+    font-weight: 600
+}
+
+button:focus-visible,
+select:focus-visible,
+input:focus-visible {
+    outline: 2px solid #1f7a5c;
+    outline-offset: 2px
+}
+
+.st {
+    color: #5a6577;
+    font-size: 13px;
+    min-height: 2.6em;
+    margin: 8px 0
+}
+
+.ctl {
+    display: grid;
+    grid-template-columns: 1fr 64px;
+    gap: 2px 8px;
+    margin: 8px 0
+}
+
+.ctl label {
+    grid-column: 1/3;
+    font-size: 13px;
+    color: #5a6577
+}
+
+.ctl input {
+    width: 100%;
+    accent-color: #1f7a5c
+}
+
+.ctl output {
+    text-align: right;
+    font-variant-numeric: tabular-nums
+}
+
+pre {
+    background: #eef1f6;
+    border: 1px solid #d8dde6;
+    border-radius: 8px;
+    padding: 8px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    max-height: 9em;
+    overflow: auto
+}
+
+summary {
+    cursor: pointer;
+    font-weight: 600;
+    padding: 4px 0
+}
+    </style>
+</head>
+
+<body>
+    <div class="wrap">
+        <h1>Depth Sensor VR Test</h1>
+        <div id="preview"></div>
+        <div class="st" id="st">Not connected.</div>
+        <div class="row">
+            <button class="main" id="bConn">Connect sensor</button>
+            <button id="bDemo">Demo data</button>
+            <button class="main" id="bVR">Enter VR</button>
+        </div>
+        <div class="card">
+            <details open>
+                <summary>Sensor input</summary>
+                <div class="row"><label>Baud <input type="number" id="baud" style="width:7em"></label>
+                    <label>Units <select id="units">
+                            <option value="1">mm</option>
+                            <option value="10">cm</option>
+                            <option value="1000">m</option>
+                        </select></label>
+                    <label><input type="checkbox" id="invert"> Invert (far is bright)</label>
+                </div>
+                <div id="sens"></div>
+                <p class="st">Values of 4000 or more (or 0 or less) count as no reading.</p>
+            </details>
+        </div>
+        <div class="card">
+            <details>
+                <summary>Raw serial log</summary>
+                <pre id="log">(nothing yet)</pre>
+            </details>
+        </div>
+    </div>
+    <script src="../vr.js"></script>
+    <script>
+        const $ = s => document.querySelector(s);
+        /* ---- page settings (sensor side only; display settings live in VR) ---- */
+        const P = { baud: 115200, units: 1, near: 300, far: 2000, invert: false };
+        try { Object.assign(P, JSON.parse(localStorage.getItem('sensorTestPage') || '{}')) } catch (e) { }
+        const saveP = () => { try { localStorage.setItem('sensorTestPage', JSON.stringify(P)) } catch (e) { } };
+        for (const [k, lab, mn, mx, st] of [['near', 'Near limit (mm)', 50, 3000, 10], ['far', 'Far limit (mm)', 200, 3500, 10]]) {
+            const d = document.createElement('div'); d.className = 'ctl';
+            d.innerHTML = `<label for="s_${k}">${lab}</label><input type="range" id="s_${k}" min="${mn}" max="${mx}" step="${st}"><output></output>`;
+            const r = d.querySelector('input'), o = d.querySelector('output'); r.value = P[k]; o.textContent = P[k];
+            r.oninput = () => { P[k] = +r.value; o.textContent = P[k]; saveP(); repaint() }; $('#sens').appendChild(d)
+        }
+        $('#baud').value = P.baud; $('#baud').onchange = e => { P.baud = +e.target.value || 115200; saveP() };
+        $('#units').value = P.units; $('#units').onchange = e => { P.units = +e.target.value; saveP() };
+        $('#invert').checked = P.invert; $('#invert').onchange = e => { P.invert = e.target.checked; saveP(); repaint() };
+
+        /* ---- mount the VR pieces ---- */
+        $('#preview').appendChild(VR.previewNode);
+        VR.enableConfigPopup(true);
+        $('#bVR').onclick = () => VR.enter();
+        $('#bDemo').onclick = () => VR.demoRunning ? VR.stopStreamingDemoData() : VR.startStreamingDemoData();
+        $('#bConn').onclick = () => port ? disconnect() : connect();
+
+        /* ---- sensor data -> 0..1 grid ---- */
+        let lastDepth = null, rows = [], frames = 0, fps = 0, lastRange = '', logLines = [], port = null, reader = null;
+        function repaint() {
+            if (!lastDepth) return;
+            const span = Math.max(1, P.far - P.near), g = [];
+            for (let y = 0; y < 8; y++) {
+                const row = []; for (let x = 0; x < 8; x++) {
+                    const v = lastDepth[y * 8 + x];
+                    if (v > 0) { let a = Math.min(1, Math.max(0, (P.far - v) / span)); row.push(P.invert ? 1 - a : a) } else row.push(NaN)
+                } g.push(row)
+            }
+            VR.paint(g)
+        }
+        const toD = a => Float32Array.from(a, v => { v = +v; return (v <= 0 || v >= 4000) ? 0 : v * P.units });
+        function gotFrame(d) {
+            lastDepth = d; frames++; let lo = 1e9, hi = -1e9; for (const v of d) if (v > 0) { lo = Math.min(lo, v); hi = Math.max(hi, v) }
+            lastRange = hi > 0 ? `${lo | 0}–${hi | 0} mm` : 'no valid cells'; repaint()
+        }
+        function handleLine(line) {
+            logLines.push(line.slice(0, 120)); if (logLines.length > 10) logLines.shift();
+            let idx = -1; const m = line.match(/^\s*(?:line\s*)?y\s*(\d+)\s*[:=]/i);
+            if (m) { idx = +m[1]; line = line.slice(m[0].length) }
+            const n = line.match(/-?\d+(?:\.\d+)?/g); if (!n) return;
+            if (n.length === 64 && idx < 0) { gotFrame(toD(n)); return }
+            if (n.length !== 8) { rows = []; return }
+            if (idx < 0) idx = rows.length;
+            if (idx === 0) rows = [];
+            rows[idx] = n;
+            if (idx === 7 && Array.from(rows).every(Boolean)) { gotFrame(toD(rows.flat())); rows = [] }
+        }
+
+        /* ---- Web Serial ---- */
+        async function connect() {
+            if (!('serial' in navigator)) { $('#st').textContent = 'Web Serial is not available in this browser.'; return }
+            try { VR.stopStreamingDemoData(); port = await navigator.serial.requestPort(); await port.open({ baudRate: P.baud || 115200 }); readLoop() }
+            catch (e) { port = null; $('#st').textContent = 'Could not connect: ' + e.message }
+        }
+        async function readLoop() {
+            const dec = new TextDecoder(); let buf = '';
+            try {
+                reader = port.readable.getReader();
+                while (true) {
+                    const { value, done } = await reader.read(); if (done) break; buf += dec.decode(value, { stream: true });
+                    let i; while ((i = buf.indexOf('\n')) >= 0) { handleLine(buf.slice(0, i).replace(/\r/g, '')); buf = buf.slice(i + 1) }
+                    if (buf.length > 4000) buf = ''
+                }
+            } catch (e) { $('#st').textContent = 'Read error: ' + e.message }
+            finally { try { reader.releaseLock() } catch (e) { } try { await port.close() } catch (e) { } port = null; reader = null }
+        }
+        async function disconnect() { if (reader) try { await reader.cancel() } catch (e) { } }
+
+        /* ---- status ---- */
+        let fc = 0, ft = performance.now();
+        setInterval(() => {
+            const n = performance.now(); fps = (frames - fc) * 1000 / (n - ft); fc = frames; ft = n;
+            let s = 'Not connected. Press Connect sensor or Demo data.';
+            if (VR.demoRunning) s = 'Showing demo data.';
+            else if (port) s = `Connected to sensor. ${fps.toFixed(1)} frames/s. Depth ${lastRange}.`;
+            $('#st').textContent = s;
+            $('#bConn').textContent = port ? 'Disconnect' : 'Connect sensor'; $('#bDemo').textContent = VR.demoRunning ? 'Stop demo' : 'Demo data';
+            $('#log').textContent = logLines.length ? logLines.join('\n') : '(nothing yet)'
+        }, 500);
+    </script>
+</body>
+
+</html>

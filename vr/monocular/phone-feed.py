@@ -13,8 +13,8 @@ HOST = "127.0.0.1"
 PORT = 5000
 MODEL_NAME = "LiheYoung/depth-anything-small-hf"
 PROCESS_IMAGE_SIZE = 252
-OUTPUT_WIDTH = 8
-OUTPUT_HEIGHT = 8
+OUTPUT_WIDTH = 252
+OUTPUT_HEIGHT = 252
 DISPLAY_DEPTH_ALONGSIDE_CAMERA = True
 DISPLAY_AT_INPUT_RESOLUTION = True
 
@@ -140,7 +140,7 @@ reader = threading.Thread(
     target=receive_frames, args=(conn, frame_queue), daemon=True
 )
 reader.start()
-cv2.namedWindow("Live Phone Camera Feed", cv2.WINDOW_NORMAL)
+# cv2.namedWindow("Live Phone Camera Feed", cv2.WINDOW_NORMAL)
 
 try:
     while True:
