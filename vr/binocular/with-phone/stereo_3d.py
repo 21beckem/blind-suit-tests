@@ -38,7 +38,7 @@ DEFAULTS = {
     "max_depth_mm": 6000.0,               # points farther than this are dropped
     "max_image_side_px": 1200,            # photos are downscaled to this for speed
     "block_size": 5,
-    "remove_outliers": True,
+    "remove_outliers": False,
     "point_size": 2.0,
 }
 
@@ -99,6 +99,11 @@ def estimate_pose(p1, p2, K):
 
 def compute_disparity(gl, gr, num_disp, block):
     block = block if block % 2 else block + 1
+    # OpenCV's SGBM leaves the first `num_disp` columns empty; pad both images on
+    # the left so the left part of the scene is not thrown away, and crop afterwards.
+    pad = num_disp
+    gl = cv2.copyMakeBorder(gl, 0, 0, pad, 0, cv2.BORDER_REPLICATE)
+    gr = cv2.copyMakeBorder(gr, 0, 0, pad, 0, cv2.BORDER_REPLICATE)
     matcher = cv2.StereoSGBM_create(
         minDisparity=0, numDisparities=num_disp, blockSize=block,
         P1=8 * block * block, P2=32 * block * block,
@@ -112,7 +117,7 @@ def compute_disparity(gl, gr, num_disp, block):
         wls.setLambda(8000.0)
         wls.setSigmaColor(1.5)
         raw = wls.filter(raw, gl, disparity_map_right=raw_r)
-    disp = raw.astype(np.float32) / 16.0
+    disp = raw.astype(np.float32)[:, pad:] / 16.0
     disp[disp <= 0] = np.nan
     return disp
 
@@ -187,7 +192,7 @@ def reconstruct(img_l, img_r, K, cfg, debug_dir=None):
 
     pts = xyz[valid].astype(np.float64)
     cols = cv2.cvtColor(rect_l, cv2.COLOR_BGR2RGB)[valid].astype(np.float64) / 255.0
-    return pts, cols, {"swapped": swapped}
+    return pts, cols, {"swapped": swapped, "f_rect": f_rect}
 
 
 # --------------------------------------------------------------------------- output
@@ -204,6 +209,13 @@ def save_ply(path, pts, cols):
     np.savetxt(path, data, fmt="%.4f %.4f %.4f %d %d %d", header=header, comments="")
     print(f"Saved {path} ({len(pts)} points, metres)")
 
+def change_view(vis):
+    ctr = vis.get_view_control()
+    # Programmatically enforce camera parameters every frame update
+    cam_params = ctr.convert_to_pinhole_camera_parameters()
+    # Modify cam_params.extrinsic to lock specific axes here
+    ctr.convert_from_pinhole_camera_parameters(cam_params)
+    return False
 
 def show_open3d(o3d, pts, cols, point_size):
     pcd = o3d.geometry.PointCloud()
@@ -215,6 +227,7 @@ def show_open3d(o3d, pts, cols, point_size):
     vis.create_window("Stereo 3D - drag to orbit, ctrl+drag to pan, wheel to zoom", 1280, 800)
     vis.add_geometry(pcd)
     vis.add_geometry(origin)
+    vis.register_animation_callback(change_view)
     opt = vis.get_render_option()
     opt.point_size = float(point_size)
     opt.background_color = np.array([0.08, 0.08, 0.10])
@@ -248,9 +261,9 @@ def show_matplotlib(pts, cols):
 # --------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Interactive 3D view from a stereo/photo pair.")
-    ap.add_argument("--left", help="left image", default="room-left.jpg")
-    ap.add_argument("--right", help="right image", default="room-right.jpg")
-    ap.add_argument("-c", "--config", default="stereo-config.json")
+    ap.add_argument("left", help="first photo (left position)")
+    ap.add_argument("right", help="second photo (moved to the right)")
+    ap.add_argument("-c", "--config", default="stereo_config.json")
     ap.add_argument("--save-ply", metavar="FILE", help="also save the point cloud as .ply")
     ap.add_argument("--no-view", action="store_true", help="don't open the 3D window")
     ap.add_argument("--debug-dir", help="save rectified pair + disparity previews here")
