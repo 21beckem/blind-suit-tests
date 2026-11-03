@@ -1,0 +1,16 @@
+{
+  "_notes": "Samsung Galaxy Note20, 1x rear camera, default 12MP 4:3 photos (4000x3000). Real focal length ~5.4 mm / 1.8 um pixels = ~3000 px at 4000 px long side. Baseline = ~5 inches (127 mm). Keys starting with _ are ignored.",
+
+  "focal_length_px": 3000.0,
+  "focal_reference_long_side_px": 4000,
+
+  "baseline_mm": 127.0,
+
+  "min_depth_mm": 400,
+  "max_depth_mm": 6000,
+
+  "max_image_side_px": 1200,
+  "block_size": 5,
+  "remove_outliers": true,
+  "point_size": 2.0
+}
