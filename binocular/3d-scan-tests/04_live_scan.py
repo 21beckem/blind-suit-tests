@@ -6,6 +6,7 @@ Walk/pan SLOWLY and smoothly. Keep textured things (furniture, posters, door fra
 give the stereo matcher nothing to lock onto. Overlap what you already scanned so tracking stays locked.
 
 Keys (camera window or 3D window):  SPACE pause | R reset map | S save now | Q quit (auto-saves)
+3D window only: F fit the whole scan | A toggle automatic fitting as the scan grows
 Output goes to ./scans/ : *_mesh.ply, *_points.ply, *_trajectory.npy
 """
 import argparse
@@ -22,6 +23,61 @@ from common import (SCAN_DIR, Calibration, Rectifier, StereoCamera, StereoMatche
 from scanner_core import ScanSession
 
 STATE_COLORS = {"TRACKING": (0, 255, 0), "INIT": (0, 255, 255), "NO DEPTH": (0, 120, 255), "LOST": (0, 0, 255)}
+
+
+class ViewFramer:
+    """Tracks map growth so the Open3D camera can frame real geometry, not the startup dummy point."""
+
+    def __init__(self):
+        self.auto = True
+        self.lo = None
+        self.hi = None
+
+    def reset(self):
+        self.lo = None
+        self.hi = None
+
+    @staticmethod
+    def bounds(points):
+        points = np.asarray(points)
+        if len(points) == 0:
+            return None
+        finite = points[np.all(np.isfinite(points), axis=1)]
+        if len(finite) == 0:
+            return None
+        return finite.min(axis=0), finite.max(axis=0)
+
+    def should_fit(self, points):
+        bounds = self.bounds(points)
+        if bounds is None:
+            return False
+        lo, hi = bounds
+        if self.lo is None:
+            return True
+        old_span = np.maximum(self.hi - self.lo, 0.10)
+        union_span = np.maximum(np.maximum(self.hi, hi) - np.minimum(self.lo, lo), 0.10)
+        return bool(np.max(union_span / old_span) >= 1.25)
+
+    def fitted(self, points):
+        bounds = self.bounds(points)
+        if bounds is not None:
+            self.lo, self.hi = bounds
+
+
+def fit_scan_view(vis, points, framer):
+    """Fit the complete live cloud while preserving the natural OpenCV camera orientation."""
+    bounds = framer.bounds(points)
+    if bounds is None:
+        return False
+    lo, hi = bounds
+    vis.reset_view_point(True)  # recompute scale/clipping from the real cloud
+    ctr = vis.get_view_control()
+    ctr.set_front([0, 0, -1])   # camera behind the origin, looking along live scan +Z
+    ctr.set_up([0, -1, 0])      # live OpenCV Y points down
+    ctr.set_lookat(((lo + hi) * 0.5).tolist())
+    ctr.set_zoom(0.72)
+    framer.fitted(points)
+    return True
 
 
 class Controls:
@@ -157,7 +213,7 @@ def main():
     th.start()
 
     vis = o3d.visualization.VisualizerWithKeyCallback()
-    vis.create_window("Live room scan  [R reset | S save | SPACE pause | Q quit]", 1280, 800)
+    vis.create_window("Live room scan  [F fit | A auto-fit | R reset | S save | SPACE pause | Q quit]", 1280, 800)
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(np.zeros((1, 3)))
     pcd.colors = o3d.utility.Vector3dVector(np.ones((1, 3)))
@@ -172,11 +228,13 @@ def main():
     opt = vis.get_render_option()
     opt.point_size = 2.0
     opt.background_color = np.array([0.04, 0.04, 0.06])
+    # The startup geometry is only a tiny dummy point. Do not set the final view from its bounds;
+    # fit again as soon as the first real cloud arrives.
     ctr = vis.get_view_control()
-    ctr.set_front([0, 0, -1])      # view from behind the start pose, looking along +Z (OpenCV convention)
-    ctr.set_up([0, -1, 0])         # camera Y axis points down
-    ctr.set_lookat([0, 0, 1.5])
-    ctr.set_zoom(0.35)
+    ctr.set_front([0, 0, -1])
+    ctr.set_up([0, -1, 0])
+    framer = ViewFramer()
+    view_action = {"fit": False}
 
     def key_cb(action):
         def f(_v):
@@ -196,7 +254,15 @@ def main():
     def do_save():
         ctrl.save_req = True
 
-    for ch, act in (("Q", do_quit), ("R", do_reset), ("S", do_save), (" ", toggle_pause)):
+    def do_fit():
+        view_action["fit"] = True
+
+    def toggle_auto_fit():
+        framer.auto = not framer.auto
+        shared.log("Automatic view fitting " + ("ON" if framer.auto else "OFF"))
+
+    for ch, act in (("Q", do_quit), ("R", do_reset), ("S", do_save), (" ", toggle_pause),
+                    ("F", do_fit), ("A", toggle_auto_fit)):
         vis.register_key_callback(ord(ch), key_cb(act))
 
     drawn_pose = np.eye(4)
@@ -217,10 +283,18 @@ def main():
                 pcd.colors = o3d.utility.Vector3dVector(np.ones((1, 3)))
                 vis.update_geometry(pcd)
                 shown_traj = 0
+                framer.reset()
             if cloud is not None and len(cloud[0]) > 0:
                 pcd.points = o3d.utility.Vector3dVector(cloud[0].astype(np.float64))
                 pcd.colors = o3d.utility.Vector3dVector(cloud[1].astype(np.float64))
                 vis.update_geometry(pcd)
+                if framer.auto and framer.should_fit(cloud[0]):
+                    view_action["fit"] = True
+            if view_action["fit"]:
+                view_action["fit"] = False
+                current_points = np.asarray(pcd.points)
+                if fit_scan_view(vis, current_points, framer):
+                    shared.log("View fitted to the complete scan")
             if not np.allclose(pose, drawn_pose):
                 cam_frame.transform(pose @ np.linalg.inv(drawn_pose))
                 drawn_pose = pose

@@ -13,6 +13,7 @@
 | 3 | `python 03_depth_test.py` | Live rectified view, epipolar check, depth map, sliders. Click a point to read distance; verify with a tape measure. `S` saves tuned settings |
 | 3a | `python 05_single_frame_test.py` | Freezes one frame and saves a reproducible rectification/depth/confidence/point-cloud report before tracking is involved |
 | 4 | `python 04_live_scan.py` | Live tracking + 3D map in a viewer. `S` save, `R` reset, `SPACE` pause, `Q` quit (auto-saves to `scans/`) |
+| 5 | `python 06_view_scan.py` | Opens the newest saved point cloud without using the camera. Pass a scan path or use `--geometry mesh` when needed. |
 
 Re-run step 2 whenever you change mode/resolution, swap eyes, or bump/rebuild the module.
 
@@ -51,10 +52,26 @@ recalibration is the correct fix for a persistent offset.
 
 ## Scanning tips
 - Move slowly and smoothly; rotate gently. Overlap areas you already scanned.
+- The live 3D view fits itself to the first real cloud and re-fits when the map grows substantially. Press `F`
+  to fit the whole scan immediately, or `A` to disable/enable automatic fitting while you inspect it manually.
 - Keep textured objects in view. Blank white walls/floors give no depth (holes) and weak tracking.
 - Light the room well and evenly. Global shutter helps with motion blur, but it is mono and needs light.
 - Closest measurable distance is printed at start (depends on baseline x focal / num_disparities).
 - If you see LOST: slowly return to a place you already scanned; it re-localises automatically.
+
+## Viewing saved scans
+
+`python 06_view_scan.py` opens the newest `scans/*_points.ply`. You can also select a particular scan by
+passing its base name or any of its output files:
+
+```powershell
+python 06_view_scan.py scans/scan_20261104_162212_points.ply
+python 06_view_scan.py scans/scan_20261104_162212 --geometry mesh
+```
+
+Point clouds load much faster and are the default unless you pass a `_mesh.ply` path. Use `--geometry both` to
+overlay the point cloud and mesh, `--no-trajectory` to hide the orange camera path, and press `F` at any time
+to restore the full-scan view.
 
 ## Troubleshooting
 - Probe finds nothing: other app using the camera? Try `--backend msmf`, another USB port, or `--dual 0 1`.
