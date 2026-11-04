@@ -1,0 +1,44 @@
+{
+  "seed": 42,
+  "room": {
+    "width_m": 5.0,
+    "depth_m": 7.0,
+    "height_m": 2.6,
+    "sensor_height_m": 1.4,
+    "front_offset_m": 0.25,
+    "include_ceiling": false
+  },
+  "objects": {
+    "count": 8,
+    "allowed": ["box", "cabinet", "table", "chair", "cylinder"],
+    "weights": {},
+    "wall_margin_m": 0.15,
+    "object_margin_m": 0.1,
+    "front_clearance_m": 0.7,
+    "placement_attempts": 250
+  },
+  "scan": {
+    "omniscient_scan": false,
+    "sensor_position_m": [0.0, 0.0, -0.5],
+    "sensor_yaw_deg": 0.0,
+    "single_view_horizontal_fov_deg": 90.0,
+    "single_view_vertical_fov_deg": 70.0,
+    "points_per_m2": 3000,
+    "noise_sigma_m": 0.008,
+    "dropout": 0.03,
+    "max_range_m": 10.0,
+    "outlier_fraction": 0.001,
+    "voxel_m": 0.0,
+    "max_points": 1000000,
+    "visibility_epsilon_m": 0.012,
+    "flat_plane_degradation": true,
+    "flat_plane_min_area_m2": 0.25,
+    "flat_plane_dropout": 0.92,
+    "flat_plane_center_noise_m": 0.08,
+    "flat_plane_edge_noise_m": 0.02,
+    "flat_plane_edge_width_m": 0.15,
+    "flat_plane_object_radius_m": 0.55,
+    "flat_plane_clarity_power": 0.5
+  }
+}
+
