@@ -1,12 +1,13 @@
 {
-  "_notes": "Samsung Galaxy Note20, 1x rear camera, default 12MP 4:3 photos (4000x3000). Real focal length ~5.4 mm / 1.8 um pixels = ~3000 px at 4000 px long side. Baseline = ~5 inches (127 mm). Keys starting with _ are ignored.",
+  "_notes": "ELP-USB3DGS800P-V83 dual OV9281 stereo module (Amazon B0D9VY8JG4). Each eye is 1280x800; the USB camera outputs the two synchronized eyes side-by-side as 2560x800. Nominal per-eye HFOV is 63 degrees, giving fx ~= 1044.4 px at 1280 px width. Lens-center baseline is approximately 60 mm on the 80 mm board. Keys starting with _ are ignored.",
+  "_calibration_warning": "Focal length and baseline are nominal values. For accurate metric depth, replace them with values from a checkerboard stereo calibration and/or a physical center-to-center lens measurement.",
 
-  "focal_length_px": 3000.0,
-  "focal_reference_long_side_px": 4000,
+  "focal_length_px": 1044.4,
+  "focal_reference_long_side_px": 1280,
 
-  "baseline_mm": 127.0,
+  "baseline_mm": 60.0,
 
-  "min_depth_mm": 400,
+  "min_depth_mm": 200,
   "max_depth_mm": 6000,
 
   "max_image_side_px": 1200,

@@ -1,7 +1,7 @@
 {
   "camera": {
     "mode": "sbs",
-    "index": 2,
+    "index": 1,
     "index_right": 1,
     "backend": "dshow",
     "width": 1280,
@@ -20,15 +20,15 @@
   },
   "stereo": {
     "scale": 1.0,
-    "num_disparities": 96,
-    "block_size": 5,
-    "uniqueness": 10,
-    "speckle_window": 100,
-    "speckle_range": 2,
+    "num_disparities": 80,
+    "block_size": 3,
+    "uniqueness": 0,
+    "speckle_window": 76,
+    "speckle_range": 1,
     "disp12_max_diff": 1,
     "pre_filter_cap": 31,
-    "min_depth": 0.25,
-    "max_depth": 4.0,
+    "min_depth": 0.16,
+    "max_depth": 10.0,
     "edge_filter": 0.1,
     "clahe": false
   },
