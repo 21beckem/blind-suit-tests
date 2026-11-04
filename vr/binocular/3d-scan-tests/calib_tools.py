@@ -23,6 +23,32 @@ def find_corners(gray, cols, rows):
     return c.reshape(-1, 1, 2).astype(np.float32)
 
 
+def match_pair(cl, cr, cols, rows):
+    """Decide whether left/right corner sets describe the same board, trying all four possible
+    corner orderings of the right eye. A constant vertical/horizontal offset between the eyes is fine
+    (calibration solves for it); what matters is that the two point sets differ by a near-constant shift.
+    Returns (status, cr_ordered, median_dx, median_dy, residual_px, ordering_name);
+    status is 'ok', 'swapped' (eyes look reversed) or 'mismatch'."""
+    L = cl[:, 0, :].astype(np.float64)
+    G = cr[:, 0, :].astype(np.float64).reshape(rows, cols, 2)
+    cands = {"as is": G, "reversed": G[::-1, ::-1], "rows mirrored": G[:, ::-1], "cols mirrored": G[::-1, :]}
+    extent = max(float(np.ptp(L[:, 0])), float(np.ptp(L[:, 1])), 1.0)
+    best = None
+    for name, g in cands.items():
+        c = np.ascontiguousarray(g.reshape(-1, 2))
+        d = L - c
+        r = d - np.median(d, axis=0)
+        res = float(np.hypot(r[:, 0], r[:, 1]).mean())
+        if best is None or res < best[0]:
+            best = (res, name, c, d)
+    res, name, c, d = best
+    dx, dy = float(np.median(d[:, 0])), float(np.median(d[:, 1]))
+    if res > 0.2 * extent:
+        return "mismatch", cr, dx, dy, res, name
+    out = np.ascontiguousarray(c.reshape(-1, 1, 2).astype(np.float32))
+    return ("ok" if dx > 0 else "swapped"), out, dx, dy, res, name
+
+
 def pose_features(corners, cols, rows, size):
     """Small descriptor of how the board sits in the image: position, size, tilt."""
     w, h = size

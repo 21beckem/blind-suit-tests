@@ -6,7 +6,7 @@
 
 Tips: hold the board FLAT and still for a moment. Cover the whole image incl. corners, vary distance
 (0.4-2 m) and tilt it (up to ~40 degrees). Good result: stereo RMS < 0.5 px.
-Keys: SPACE = capture now | U = undo last | ENTER = finish | Q = quit
+Keys: SPACE = capture now | U = undo last | X = swap eyes | ENTER = finish | Q = quit
 """
 import argparse
 import sys
@@ -98,7 +98,7 @@ def main():
 
     cam = StereoCamera(cfg["camera"]).start()
     pts_l, pts_r, feats, centroids = [], [], [], []
-    size, last_id, last_corners, last_capture = None, -1, None, 0.0
+    size, last_id, last_corners, last_capture, last_diag = None, -1, None, 0.0, 0.0
     msg = "Show the board to both eyes"
     try:
         while True:
@@ -111,15 +111,35 @@ def main():
             cl = ct.find_corners(l, cols, rows)
             cr = ct.find_corners(r, cols, rows) if cl is not None else None
             both = cl is not None and cr is not None
-            sane = both and float(np.abs(cl[:, 0, 1] - cr[:, 0, 1]).mean()) < 25.0 and \
-                float((cl[:, 0, 0] - cr[:, 0, 0]).mean()) > 0
-            if both and not sane:
-                msg = "Eyes disagree (corner order/swap?) - check swap_eyes in 01_probe.py"
+            status = None
+            if both:
+                status, cr_fixed, dx, dy, res, how = ct.match_pair(cl, cr, cols, rows)
+                if status != "mismatch":
+                    cr = cr_fixed
+            sane = both and status == "ok"
+            if both and status == "swapped":
+                msg = "Eyes look SWAPPED (dx=%.0f px) - press X to swap them" % dx
+            elif both and status == "mismatch":
+                msg = "Corners do not match between eyes (dx=%.0f, dy=%.0f, resid=%.0f px)" % (dx, dy, res)
+                if time.time() - last_diag > 2.0:
+                    last_diag = time.time()
+                    print("DIAG mismatch: median dx=%.1f px, median dy=%.1f px, residual=%.1f px (best ordering: %s), "
+                          "first corner L=%s R=%s, image %dx%d" % (dx, dy, res, how, cl[0, 0].round(1), cr[0, 0].round(1),
+                                                                   l.shape[1], l.shape[0]))
+                    dbg = np.hstack([cv2.cvtColor(l, cv2.COLOR_GRAY2BGR), cv2.cvtColor(r, cv2.COLOR_GRAY2BGR)])
+                    cv2.drawChessboardCorners(dbg[:, :l.shape[1]], (cols, rows), cl, True)
+                    cv2.drawChessboardCorners(dbg[:, l.shape[1]:], (cols, rows), cr, True)
+                    cv2.imwrite(str(CALIB_IMG_DIR.parent / "calib_debug_mismatch.png"), dbg)
+                    print("  saved calib_debug_mismatch.png (both eyes with detected corners)")
             elif both:
                 stable = last_corners is not None and \
                     float(np.linalg.norm(cl[:, 0] - last_corners[:, 0], axis=1).mean()) < STABLE_PX
                 f = ct.pose_features(cl, cols, rows, size)
                 diverse = all(np.linalg.norm(f - g) > FEATURE_MIN_DIST for g in feats)
+                if abs(dy) > 25 and time.time() - last_diag > 5.0:
+                    last_diag = time.time()
+                    print("NOTE: eyes are offset vertically by %.0f px (%s). Calibration can handle it, "
+                          "but check the lenses are mounted level." % (dy, how))
                 msg = "Board found" + ("" if stable else " - hold still") + ("" if diverse else " - move/tilt to a NEW pose")
                 if stable and diverse and time.time() - last_capture > COOLDOWN_S:
                     k = len(pts_l)
@@ -150,10 +170,19 @@ def main():
             col = (0, 255, 0) if both else (0, 120, 255)
             cv2.putText(vis, "%d / %d views | %s" % (len(pts_l), want, msg), (10, 28),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, col, 2)
-            cv2.imshow("02_calibrate  (SPACE capture | U undo | ENTER finish | Q quit)", vis)
+            cv2.imshow("02_calibrate  (SPACE capture | U undo | X swap eyes | ENTER finish | Q quit)", vis)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 return 0
+            if key in (ord("x"), ord("X")):
+                cfg["camera"]["swap_eyes"] = not cfg["camera"]["swap_eyes"]
+                cam.cfg["swap_eyes"] = cfg["camera"]["swap_eyes"]
+                save_config(cfg)
+                pts_l.clear(), pts_r.clear(), feats.clear(), centroids.clear()
+                for old in CALIB_IMG_DIR.glob("pair_*.png"):
+                    old.unlink()
+                last_corners = None
+                print("swap_eyes is now %s (captures cleared)" % cfg["camera"]["swap_eyes"])
             if key == ord(" ") and sane:
                 k = len(pts_l)
                 cv2.imwrite(str(CALIB_IMG_DIR / ("pair_%03d_L.png" % k)), l)

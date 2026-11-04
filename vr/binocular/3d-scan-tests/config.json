@@ -1,7 +1,7 @@
 {
   "camera": {
     "mode": "sbs",
-    "index": 1,
+    "index": 2,
     "index_right": 1,
     "backend": "dshow",
     "width": 1280,
