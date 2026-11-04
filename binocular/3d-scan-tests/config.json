@@ -15,20 +15,20 @@
   "calibration": {
     "board_cols": 9,
     "board_rows": 6,
-    "square_mm": 25.0,
+    "square_mm": 24.4,
     "num_views": 30
   },
   "stereo": {
     "scale": 1.0,
     "num_disparities": 80,
-    "block_size": 3,
+    "block_size": 7,
     "uniqueness": 0,
-    "speckle_window": 76,
+    "speckle_window": 19,
     "speckle_range": 1,
     "disp12_max_diff": 1,
     "pre_filter_cap": 31,
-    "min_depth": 0.16,
-    "max_depth": 10.0,
+    "min_depth": 0.3,
+    "max_depth": 4.0,
     "edge_filter": 0.1,
     "clahe": false
   },
