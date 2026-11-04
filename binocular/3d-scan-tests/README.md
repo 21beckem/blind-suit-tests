@@ -11,9 +11,43 @@
 | 1 | `python 01_probe.py` | Finds the camera, sweeps modes, measures real FPS, checks left/right eye order, saves `config.json` |
 | 2 | `python make_board.py`, print at 100%, glue flat. Then `python 02_calibrate.py --square-mm <measured>` | Auto-captures ~30 poses, solves intrinsics + stereo extrinsics, saves `calibration.npz` |
 | 3 | `python 03_depth_test.py` | Live rectified view, epipolar check, depth map, sliders. Click a point to read distance; verify with a tape measure. `S` saves tuned settings |
+| 3a | `python 05_single_frame_test.py` | Freezes one frame and saves a reproducible rectification/depth/confidence/point-cloud report before tracking is involved |
 | 4 | `python 04_live_scan.py` | Live tracking + 3D map in a viewer. `S` save, `R` reset, `SPACE` pause, `Q` quit (auto-saves to `scans/`) |
 
 Re-run step 2 whenever you change mode/resolution, swap eyes, or bump/rebuild the module.
+
+## Single-frame validation
+
+Run this after calibration and matcher tuning, before testing tracking:
+
+```powershell
+python 05_single_frame_test.py
+```
+
+It captures one synchronized pair and writes a timestamped directory under `validation_runs/` containing
+the raw and rectified images, disparity and metric-depth arrays, a left/right consistency mask, two point
+clouds, `summary.png`, and a machine-readable `report.json`. Click a textured target in the viewer to sample
+a 9x9 depth patch. If its distance was measured with a tape, include it on the command line:
+
+```powershell
+python 05_single_frame_test.py --known-distance 1.19
+```
+
+For repeatable, non-interactive tests, specify a target rectangle and disable the viewer:
+
+```powershell
+python 05_single_frame_test.py --known-distance 1.19 --roi 220 150 100 80 --no-view
+```
+
+Saved pairs can be retested without the camera:
+
+```powershell
+python 05_single_frame_test.py --left left.png --right right.png --no-view
+```
+
+The report includes signed epipolar error. A positive suggested shift means the rectified right image would
+need to move downward by that many pixels. `--vertical-shift N` can test that hypothesis, but it is diagnostic;
+recalibration is the correct fix for a persistent offset.
 
 ## Scanning tips
 - Move slowly and smoothly; rotate gently. Overlap areas you already scanned.
