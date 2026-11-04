@@ -1,4 +1,5 @@
 python -m venv .venv
 call .venv\Scripts\activate
 
-pip install opencv-python pillow torch transformers pyserial matplotlib open3d
+pip install --upgrade pip
+pip install -r requirements.txt

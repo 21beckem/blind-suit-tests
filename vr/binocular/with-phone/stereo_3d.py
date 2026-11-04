@@ -38,7 +38,7 @@ DEFAULTS = {
     "max_depth_mm": 6000.0,               # points farther than this are dropped
     "max_image_side_px": 1200,            # photos are downscaled to this for speed
     "block_size": 5,
-    "remove_outliers": False,
+    "remove_outliers": True,
     "point_size": 2.0,
 }
 
@@ -192,7 +192,10 @@ def reconstruct(img_l, img_r, K, cfg, debug_dir=None):
 
     pts = xyz[valid].astype(np.float64)
     cols = cv2.cvtColor(rect_l, cv2.COLOR_BGR2RGB)[valid].astype(np.float64) / 255.0
-    return pts, cols, {"swapped": swapped, "f_rect": f_rect}
+    ys, xs = np.nonzero(valid)  # same (row-major) order as xyz[valid]
+    return pts, cols, {"swapped": swapped, "f_rect": f_rect,
+                       "pix": np.stack([ys, xs], 1), "disp": d0[valid].astype(np.float32),
+                       "shape": valid.shape}
 
 
 # --------------------------------------------------------------------------- output
@@ -209,13 +212,6 @@ def save_ply(path, pts, cols):
     np.savetxt(path, data, fmt="%.4f %.4f %.4f %d %d %d", header=header, comments="")
     print(f"Saved {path} ({len(pts)} points, metres)")
 
-def change_view(vis):
-    ctr = vis.get_view_control()
-    # Programmatically enforce camera parameters every frame update
-    cam_params = ctr.convert_to_pinhole_camera_parameters()
-    # Modify cam_params.extrinsic to lock specific axes here
-    ctr.convert_from_pinhole_camera_parameters(cam_params)
-    return False
 
 def show_open3d(o3d, pts, cols, point_size):
     pcd = o3d.geometry.PointCloud()
@@ -227,7 +223,6 @@ def show_open3d(o3d, pts, cols, point_size):
     vis.create_window("Stereo 3D - drag to orbit, ctrl+drag to pan, wheel to zoom", 1280, 800)
     vis.add_geometry(pcd)
     vis.add_geometry(origin)
-    vis.register_animation_callback(change_view)
     opt = vis.get_render_option()
     opt.point_size = float(point_size)
     opt.background_color = np.array([0.08, 0.08, 0.10])
