@@ -18,7 +18,22 @@ Point cloud conventions (metres)
   to face it, and anything beyond the outermost wall is background). For a camera, x is
   right and the camera looks down -z. Other frames: rotate/translate your cloud first.
   Noise model: pass sensor={"f": focal_px, "B": baseline_m} for a stereo rig (depth noise grows
-  with range^2), otherwise a constant cfg["noise_sigma_m"] is used.
+  with range^2), otherwise sigma(range) = cfg["noise_sigma_m"] + cfg["noise_sigma_per_m2"] * range^2
+  (a depth camera is typically 0.004 + 0.0012 * r^2). Set it to match your sensor: it widens the
+  plane slabs and the clearance above the floor/walls with distance.
+
+Big scenes (several rooms, partitions, 360-degree scans)
+  * First 5 planes: floor + wall candidates (unchanged). Up to cfg["max_extra_planes"] more are
+    searched among UPRIGHT surfaces only, and kept only if they are big walls.
+  * "Behind a wall" means the line of sight from the sensor crosses that wall, so perpendicular
+    walls meeting at a corner never hide each other, and a partition with a doorway doesn't hide
+    what is visible through the door. A wall is only treated as a "back wall" (everything beyond it
+    is discarded) if it spans most of a forward-looking sensor's view.
+  * Parallel walls on opposite sides of the sensor are different walls (normals face the sensor).
+  * Furniture: stepped tops that touch are one piece (couch seat + back); a tall leftover standing
+    on the floor (a chair whose seat is hidden behind its back) is its own object; tiny pieces
+    touching a bigger object, and pieces lying inside one, are folded into it. Floating objects
+    away from walls (chair back, hanging things) stay obstacles; pictures on a wall do not.
   Optional: segment_fn(cand_mask) -> integer label per candidate point, to split objects
   using extra knowledge (the stereo script uses the image grid). Without it, objects are
   separated in 3D.
@@ -55,10 +70,16 @@ import numpy as np
 OBS_DEFAULTS = {
     # --- noise model / RANSAC (floor search is unchanged from v1)
     "disparity_sigma_px": 0.6,        # stereo only: expected matching noise (with sensor={"f","B"})
-    "noise_sigma_m": 0.02,            # any other sensor: constant position noise
+    "noise_sigma_m": 0.02,            # any other sensor: position noise at the sensor ...
+    "noise_sigma_per_m2": 0.0,        # ... plus this * range^2 (a depth camera: ~0.001-0.002)
     "point_size": 2.0,                # viewer
     "plane_thresh_m": 0.03,           # RANSAC inlier distance
     "max_planes": 5,
+    "max_extra_planes": 7,            # further planes searched ONLY as extra wall candidates (big scenes) ...
+    "extra_upright_deg": 35.0,        # extra planes are searched among surfaces within this of upright
+    "wall_extra_min_width_m": 1.6,    # ... and these must be bigger than a normal wall candidate
+    "wall_extra_min_height_m": 1.5,
+    "wall_extra_min_area_m2": 2.5,
     "min_plane_points": 3000,
     "min_plane_area_m2": 0.25,
     "plane_cell_m": 0.04,             # raster cell size used to build plane meshes
@@ -80,7 +101,9 @@ OBS_DEFAULTS = {
     "wall_merge_dist_m": 0.25,
     "wall_band_m": 0.08,              # points this close to a wall (or behind it) are wall/background
     "wall_footprint_margin_m": 0.30,
-    "behind_range_margin_m": 0.20,    # nothing is accepted farther than the farthest wall + this
+    "behind_range_margin_m": 0.20,    # nothing is accepted farther than the farthest back wall + this
+    "back_wall_max_fov_deg": 180.0,   # (a scan wider than this has no single "back": rule off)
+    "back_wall_coverage": 0.5,        # a back wall spans at least this share of the sensor's horizontal view
     # --- horizontal surfaces (table top / seats)
     "max_supports": 10,
     "support_min_height_m": 0.15,
@@ -107,6 +130,15 @@ OBS_DEFAULTS = {
     "anchor_min_size_m": 0.9,         # a segment longer than this (or with several surfaces) is rebuilt around its surfaces
     "anchor_group_gap_m": 0.12,       # surfaces closer than this, at similar height, form one top (a table)
     "anchor_group_dh_m": 0.18,
+    "anchor_stack_dh_m": 0.30,        # tops up to this far apart in height ...
+    "anchor_stack_gap_m": 0.03,       # ... that touch (top-down) are one stepped piece (couch seat + back)
+    "keep_free_floating": True,       # floating objects away from walls (chair back, hanging things) stay obstacles
+    "floating_wall_clear_m": 0.35,    # ... floating objects this close to a wall are decoration
+    "leftover_min_height_m": 0.60,    # ... and it must stand on the floor and be at least this tall
+    "leftover_min_points": 600,       # a coherent leftover of a furniture segment this big is its own object (0 = off)
+    "fragment_area_m2": 0.04,         # an object with a smaller footprint touching another one is a fragment of it
+    "fragment_touch_m": 0.12,
+    "contain_frac": 0.85,             # footprint share inside a bigger object's footprint => same object
     "anchor_sparse_points": 450,      # a surface seen with fewer points than this (items on a glass top) ...
     "anchor_sparse_gap_m": 0.50,      # ... join a top over this longer gap
     "anchor_min_top_area_m2": 0.10,   # a lone surface smaller than this is not furniture
@@ -137,12 +169,15 @@ def sigma_z(z, f, B_m, sd_px):
     return (z * z) / (f * B_m) * sd_px
 
 
-def noise_sigma(z, cfg):
-    """1-sigma position noise (m) at range z (m): stereo model if the sensor is a stereo rig
-    (cfg['_f'], cfg['_B'] set by analyze_point_cloud), else a constant."""
+def noise_sigma(P, cfg):
+    """1-sigma position noise (m) at each point P (N,3): the stereo model if the sensor is a stereo
+    rig (cfg['_f'], cfg['_B'] set by analyze_point_cloud), else
+    noise_sigma_m + noise_sigma_per_m2 * range^2 (range = distance from the sensor)."""
+    P = np.asarray(P)
     if cfg.get("_f") and cfg.get("_B"):
-        return sigma_z(z, cfg["_f"], cfg["_B"], cfg["disparity_sigma_px"])
-    return np.full(np.shape(z), float(cfg["noise_sigma_m"]))
+        return sigma_z(-P[:, 2], cfg["_f"], cfg["_B"], cfg["disparity_sigma_px"])
+    r2 = (P * P).sum(1)
+    return float(cfg["noise_sigma_m"]) + float(cfg["noise_sigma_per_m2"]) * r2
 
 
 def orthonormal_basis(n):
@@ -224,16 +259,48 @@ def patch_mesh(o3d, patch, n, d, offset, color):
     return mesh
 
 
+def _grow_plane(pts, idx, n, d, thr_pt):
+    """Grow a RANSAC plane to every point of `idx` within its slab, refit twice -> (n, d, members)."""
+    P = pts[idx]
+    for _ in range(2):
+        member = np.abs(P @ n + d) < thr_pt[idx]
+        if member.sum() < 10:
+            break
+        n, d = fit_plane(P[member])
+    member = np.abs(P @ n + d) < thr_pt[idx]
+    return n, d, idx[member]
+
+
 def find_planes(o3d, pts, cfg):
-    """Sequential RANSAC (v1). Only used to locate the FLOOR (the first plane) plus wall candidates."""
+    """Sequential RANSAC (v1) for the first cfg['max_planes'] planes: the FLOOR plus wall candidates.
+    Then, for big scenes, up to cfg['max_extra_planes'] more planes are searched among points on
+    UPRIGHT surfaces only (so they can only be walls, never slices of the floor / object tops);
+    these are marked "extra"."""
     o3d.utility.random.seed(int(cfg["ransac_seed"]))
     N = len(pts)
-    z = -pts[:, 2]
-    thr_pt = np.maximum(cfg["plane_thresh_m"], 2.0 * noise_sigma(z, cfg))
+    thr_pt = np.maximum(cfg["plane_thresh_m"], 2.0 * noise_sigma(pts, cfg))
     remaining = np.ones(N, bool)
     rng = np.random.default_rng(0)
     planes, tries = [], 0
     min_pts = int(cfg["min_plane_points"])
+
+    def ransac_thr(P_):
+        t = float(cfg["plane_thresh_m"])
+        if not cfg.get("_f"):  # generic sensor: noisier at range -> wider slab for the first guess
+            t = max(t, 1.5 * float(np.median(noise_sigma(P_, cfg))))
+        return t
+
+    def accept(mi, n, d, extra):
+        remaining[mi] = False
+        if len(mi) < min_pts:
+            return
+        if d < 0:  # face the camera (camera is at the origin)
+            n, d = -n, -d
+        patch = plane_patch(pts[mi], n, cfg)
+        if patch is None or patch["area"] < cfg["min_plane_area_m2"]:
+            return
+        planes.append({"n": n, "d": d, "idx": mi, "patch": patch, "area": patch["area"], "extra": extra})
+
     while len(planes) < cfg["max_planes"] and tries < cfg["max_planes"] + 4:
         tries += 1
         idx = np.nonzero(remaining)[0]
@@ -242,29 +309,46 @@ def find_planes(o3d, pts, cfg):
         samp = idx if len(idx) <= 200_000 else rng.choice(idx, 200_000, replace=False)
         pc = o3d.geometry.PointCloud()
         pc.points = o3d.utility.Vector3dVector(pts[samp])
-        model, inl = pc.segment_plane(cfg["plane_thresh_m"], 3, 2000)
+        model, inl = pc.segment_plane(ransac_thr(pts[samp]), 3, 2000)
         if len(inl) < min_pts // 3:
             break
         n = np.array(model[:3])
         s = np.linalg.norm(n)
         n, d = n / s, float(model[3]) / s
-        P = pts[idx]
-        for _ in range(2):  # grow to all remaining points, then refit
-            member = np.abs(P @ n + d) < thr_pt[idx]
-            if member.sum() < 10:
-                break
-            n, d = fit_plane(P[member])
-        member = np.abs(P @ n + d) < thr_pt[idx]
-        mi = idx[member]
-        remaining[mi] = False
-        if len(mi) < min_pts:
-            continue
-        if d < 0:  # face the camera (camera is at the origin)
-            n, d = -n, -d
-        patch = plane_patch(pts[mi], n, cfg)
-        if patch is None or patch["area"] < cfg["min_plane_area_m2"]:
-            continue
-        planes.append({"n": n, "d": d, "idx": mi, "patch": patch, "area": patch["area"]})
+        n, d, mi = _grow_plane(pts, idx, n, d, thr_pt)
+        accept(mi, n, d, False)
+
+    # ---- extra wall candidates (big scenes): RANSAC restricted to points on upright surfaces
+    if cfg["max_extra_planes"] > 0:
+        idx = np.nonzero(remaining)[0]
+        if len(idx) >= min_pts:
+            rng2 = np.random.default_rng(1)
+            samp = idx if len(idx) <= 150_000 else rng2.choice(idx, 150_000, replace=False)
+            pc = o3d.geometry.PointCloud()
+            pc.points = o3d.utility.Vector3dVector(pts[samp])
+            pc.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.25, max_nn=40))
+            nz = np.asarray(pc.normals)
+            upright_pts = samp[np.abs(nz[:, 1]) < math.sin(math.radians(cfg["extra_upright_deg"]))]
+            n_extra, tries2 = 0, 0
+            while n_extra < cfg["max_extra_planes"] and tries2 < cfg["max_extra_planes"] + 3:
+                tries2 += 1
+                pool = upright_pts[remaining[upright_pts]]
+                if len(pool) < min_pts:
+                    break
+                pc = o3d.geometry.PointCloud()
+                pc.points = o3d.utility.Vector3dVector(pts[pool])
+                model, inl = pc.segment_plane(ransac_thr(pts[pool]), 3, 2000)
+                if len(inl) < min_pts // 3:
+                    break
+                n = np.array(model[:3])
+                n, d = n / np.linalg.norm(n), float(model[3]) / np.linalg.norm(n)
+                if abs(float(n[1])) > math.sin(math.radians(cfg["extra_upright_deg"])):
+                    remaining[pool[inl]] = False  # not upright after all
+                    continue
+                n, d, mi = _grow_plane(pts, np.nonzero(remaining)[0], n, d, thr_pt)
+                before = len(planes)
+                accept(mi, n, d, True)
+                n_extra += 1
     return planes
 
 
@@ -273,6 +357,8 @@ def pick_floor(pts, planes, cfg):
     cos_min = math.cos(math.radians(cfg["floor_max_tilt_deg"]))
     best, best_score = None, 0.0
     for p in planes:
+        if p.get("extra"):
+            continue
         c = float(p["n"] @ up)
         others = np.ones(len(pts), bool)
         others[p["idx"]] = False
@@ -283,7 +369,7 @@ def pick_floor(pts, planes, cfg):
     if best is None and planes:
         print("WARNING: no roughly horizontal plane found; using the largest plane as floor.",
               file=sys.stderr)
-        best = max(planes, key=lambda p: len(p["idx"]))
+        best = max([p for p in planes if not p.get("extra")] or planes, key=lambda p: len(p["idx"]))
     return best
 
 
@@ -326,8 +412,13 @@ def find_walls(pts, planes, floor, cfg):
             continue
         ang = math.degrees(math.acos(min(1.0, abs(float(p["n"] @ nf)))))
         tag = f"normal=({p['n'][0]:+.2f},{p['n'][1]:+.2f},{p['n'][2]:+.2f}) {ang:.0f} deg to floor"
+        if p.get("extra") and (abs(ang - 90.0) > cfg["wall_tol_deg"] or p["area"] < cfg["wall_extra_min_area_m2"]):
+            continue  # extra planes only matter if they are big upright walls
         if abs(ang - 90.0) > cfg["wall_tol_deg"]:
-            notes.append(f"  not drawn (oblique, {tag}): treated as object faces")
+            if ang < 15.0:
+                notes.append(f"  not drawn (horizontal, {tag}): a ceiling or a tabletop, not the floor")
+            else:
+                notes.append(f"  not drawn (oblique, {tag}): treated as object faces")
             continue
         sel, patch = largest_patch(pts[p["idx"]], p["n"], cfg)
         if sel is None:
@@ -344,6 +435,8 @@ def find_walls(pts, planes, floor, cfg):
         width = float(np.percentile(s, 98) - np.percentile(s, 2))
         height = float(np.percentile(h, 98) - np.percentile(h, 2))
         base = float(np.percentile(h, 2))
+        if p.get("extra") and (width < cfg["wall_extra_min_width_m"] or height < cfg["wall_extra_min_height_m"]):
+            continue
         if width < cfg["wall_min_width_m"] or height < cfg["wall_min_height_m"] or base > cfg["wall_max_base_m"]:
             notes.append(f"  not drawn (vertical but only {width:.2f} m wide x {height:.2f} m tall: an object face)")
             continue
@@ -351,16 +444,17 @@ def find_walls(pts, planes, floor, cfg):
         if patch2 is None:
             continue
         cands.append({"n": n, "d": d, "idx": gi, "patch": patch2, "area": patch2["area"],
-                      "width": width, "height": height, "kind": "wall"})
+                      "width": width, "height": height, "kind": "wall", "extra": bool(p.get("extra"))})
     cands.sort(key=lambda w: -len(w["idx"]))
     walls = []
     for c in cands:
         dup = False
         for w in walls:
-            a = math.degrees(math.acos(min(1.0, abs(float(c["n"] @ w["n"])))))
+            a = math.degrees(math.acos(max(-1.0, min(1.0, float(c["n"] @ w["n"])))))  # signed: opposite walls differ
             if a < cfg["wall_merge_deg"] and abs(c["d"] - w["d"]) < cfg["wall_merge_dist_m"]:
                 dup = True
-                notes.append("  merged a duplicate of an existing wall")
+                if not c.get("extra"):
+                    notes.append("  merged a duplicate of an existing wall")
                 break
         if not dup:
             walls.append(c)
@@ -443,6 +537,14 @@ def cell_centers(patch, n, d):
     return cy, cx, X
 
 
+def ray_crossing(X, w):
+    """Where the line from the sensor (origin) to each point X crosses wall w's plane (points in
+    front of / on the plane map to themselves)."""
+    wd = X @ w["n"] + w["d"]
+    lam = np.clip(w["d"] / np.maximum(w["d"] - wd, 1e-9), 0.0, 1.0)
+    return X * lam[:, None]
+
+
 def clip_patch(patch, n, d, floor, walls, self_wall=None, margin=0.3, clip_floor=True):
     """Remove cells that would poke through the floor or through a wall (planes may only
     meet along an edge, never cross)."""
@@ -456,8 +558,8 @@ def clip_patch(patch, n, d, floor, walls, self_wall=None, margin=0.3, clip_floor
         if w is self_wall:
             continue
         behind = (X @ w["n"] + w["d"]) < -0.05
-        if behind.any():
-            bad |= behind & inside_patch(w["patch"], X, margin)
+        if behind.any():  # hidden only if the line of sight to the cell passes through that wall
+            bad |= behind & inside_patch(w["patch"], ray_crossing(X, w), margin)
     patch["mask"][cy[bad], cx[bad]] = 0
     patch["area"] = float(patch["mask"].sum()) * patch["cell"] ** 2
 
@@ -550,7 +652,7 @@ def planar_coverage(o3d, P, cfg, up, max_planes=3):
     cylinder's flank splits into near-parallel strips; opposite box faces are never both seen)."""
     if len(P) < 60:
         return 0.0, False
-    sig = float(np.median(noise_sigma(-P[:, 2], cfg)))
+    sig = float(np.median(noise_sigma(P, cfg)))
     thr = float(min(0.04, max(0.015, sig)))
     rem, covered, planes = P, 0, []
     o3d.utility.random.seed(int(cfg["ransac_seed"]) + 1)  # same points -> same planes, every run
@@ -702,7 +804,7 @@ def prepare_points(o3d, Pc, labc, floor, cfg):
         P, lab = P[ind], lab[ind]
     pc.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg["normal_radius_m"], max_nn=40))
     N = np.asarray(pc.normals)
-    sd = noise_sigma(-P[:, 2], cfg)
+    sd = noise_sigma(P, cfg)
     hd = P @ floor["n"] + floor["d"]
     return P, N, hd, sd, lab
 
@@ -792,10 +894,15 @@ def group_supports(sups, cfg):
 
     for i in range(len(sups)):
         for j in range(i + 1, len(sups)):
-            if abs(sups[i]["H"] - sups[j]["H"]) > cfg["anchor_group_dh_m"]:
+            dh = abs(sups[i]["H"] - sups[j]["H"])
+            if dh > cfg["anchor_stack_dh_m"]:
                 continue
             A, Bh = sups[i]["hull_uv"], sups[j]["hull_uv"]
             gap = min(float(seat_distance(A, Bh).min()), float(seat_distance(Bh, A).min()))
+            if dh > cfg["anchor_group_dh_m"]:  # stepped tops (couch seat + back): only if they touch
+                if gap < cfg["anchor_stack_gap_m"]:
+                    parent[find(i)] = find(j)
+                continue
             sparse = min(sups[i]["n_points"], sups[j]["n_points"]) < cfg["anchor_sparse_points"]
             if gap < (cfg["anchor_sparse_gap_m"] if sparse else cfg["anchor_group_gap_m"]):
                 parent[find(i)] = find(j)
@@ -821,7 +928,7 @@ def anchored_pieces(Pk, sup, floor, cfg):
             continue
         tops.append({"hull": hull, "H": float(np.median([s["H"] for s in g])), "sups": g})
     if not tops:
-        return []
+        return [], Pk[:0]
     if cfg.get("_verbose"):
         for t in tops:
             c = t["hull"].mean(0)
@@ -830,15 +937,69 @@ def anchored_pieces(Pk, sup, floor, cfg):
                   f"{[round(x['fill'], 2) for x in t['sups']]}, centre u,v=({c[0]:+.2f},{c[1]:+.2f})")
     dist = np.stack([seat_distance(uv, t["hull"]) for t in tops], 1)
     near = dist.argmin(1)
+    used = np.zeros(len(Pk), bool)
     for k, t in enumerate(tops):
         sel = (near == k) & (dist[:, k] < cfg["anchor_radius_m"]) & (hk < t["H"] + cfg["anchor_height_m"])
         if sel.sum() < cfg["fragment_min_points"]:
             continue
         pieces.append((Pk[sel], t))
-    return pieces
+        used |= sel
+    return pieces, Pk[~used]
 
 
-def find_obstacles(P, N, hd, sd, lab, supports, floor, o3d, cfg):
+def _footprint(ob, e1, e2):
+    c = ob["box_corners"][:4]
+    return np.stack([c @ e1, c @ e2], 1).astype(np.float32)
+
+
+def _poly_gap(A, B):
+    """Distance between two convex footprints (0 if they overlap)."""
+    if cv2.intersectConvexConvex(A, B)[0] > 0:
+        return 0.0
+    d = [-cv2.pointPolygonTest(B.reshape(-1, 1, 2), (float(x), float(y)), True) for x, y in A]
+    d += [-cv2.pointPolygonTest(A.reshape(-1, 1, 2), (float(x), float(y)), True) for x, y in B]
+    return float(min(d))
+
+
+def merge_fragments(obstacles, floor, o3d, cfg, add_fit):
+    """Fold an object into a bigger one and refit the bigger one on both point sets when it is
+      - a tiny object (< fragment_area_m2) touching the bigger one: a chair back seen edge-on, a leg;
+      - an object whose footprint lies (>= contain_frac) inside the bigger one's and is not taller:
+        a duplicate piece of the same furniture (two stepped tops of one couch)."""
+    e1, e2 = orthonormal_basis(floor["n"])
+    changed = True
+    while changed and len(obstacles) > 1:
+        changed = False
+        for f in sorted(obstacles, key=lambda o: o["info"]["size_m"][0] * o["info"]["size_m"][1]):
+            sz = f["info"]["size_m"]
+            area_f = sz[0] * sz[1]
+            fp = _footprint(f, e1, e2)
+            best, bd = None, 9.0
+            for o in obstacles:
+                oz = o["info"]["size_m"]
+                if o is f or oz[0] * oz[1] <= area_f:
+                    continue
+                gp = _footprint(o, e1, e2)
+                inter = cv2.intersectConvexConvex(fp, gp)[0]
+                contained = inter >= cfg["contain_frac"] * max(cv2.contourArea(fp), 1e-9) and sz[2] <= oz[2] + 0.10
+                g = 0.0 if contained else (_poly_gap(fp, gp) if area_f < cfg["fragment_area_m2"] else 9.0)
+                if (contained or g < cfg["fragment_touch_m"]) and g < bd:
+                    best, bd = o, g
+            if best is None:
+                continue
+            ex = [x for x in (best["_ex"], f["_ex"]) if x is not None and len(x)]
+            Pu = np.vstack([best["_Pk"], f["_Pk"]])
+            exu = np.vstack(ex) if ex else None
+            merged = add_fit(Pu, exu, best["anchored"])
+            merged.update({"cluster": best["cluster"], "anchored": best["anchored"],
+                           "used": best["used"] + f["used"], "_Pk": Pu, "_ex": exu})
+            obstacles = [o for o in obstacles if o is not best and o is not f] + [merged]
+            changed = True
+            break
+    return obstacles
+
+
+def find_obstacles(P, N, hd, sd, lab, supports, floor, o3d, cfg, walls=()):
     n, d = floor["n"], floor["d"]
     e1, e2 = orthonormal_basis(n)
     lab = tidy_segments(P, lab, cfg)
@@ -878,8 +1039,15 @@ def find_obstacles(P, N, hd, sd, lab, supports, floor, o3d, cfg):
         if sz[2] < cfg["min_obstacle_height_m"] or sz[0] < cfg["min_obstacle_size_m"]:
             return
         if not anchored and ob["info"]["bottom_m"] > cfg["grounded_max_m"]:
-            return  # floating leftover (something on a wall, a hanging item): not an obstacle
+            # floating: a picture on a wall is not an obstacle, but a chair back whose seat is hidden is
+            c = np.asarray(ob["info"]["center_m"])
+            near_wall = any(abs(float(c @ w["n"] + w["d"])) < cfg["floating_wall_clear_m"]
+                            + 0.5 * ob["info"]["size_m"][0] for w in walls)
+            if near_wall or not cfg["keep_free_floating"]:
+                return
+            ob["floating"] = True
         ob["cluster"], ob["anchored"], ob["used"] = L, anchored, [id(x) for x in used]
+        ob["_Pk"], ob["_ex"] = Pk, ex
         obstacles.append(ob)
 
     for L in range(lab.max() + 1):
@@ -893,11 +1061,29 @@ def find_obstacles(P, N, hd, sd, lab, supports, floor, o3d, cfg):
             (_, _), (rw, rh), _ = cv2.minAreaRect(np.stack([core @ e1, core @ e2], 1).astype(np.float32))
             long_side = max(rw, rh)
         if sup and (len(sup) >= 2 or long_side > cfg["anchor_min_size_m"]):
-            for Ppiece, top in anchored_pieces(Pk, sup, floor, cfg):
+            pieces, rest = anchored_pieces(Pk, sup, floor, cfg)
+            for Ppiece, top in pieces:
                 add(Ppiece, hull_ring(top["hull"], top["H"], e1, e2, n, d), L, True, top["sups"])
+            if pieces and cfg["leftover_min_points"] > 0 and len(rest) >= cfg["leftover_min_points"]:
+                # what the furniture step did not take (a chair whose seat is hidden behind its back)
+                lab2 = segment_points_3d(rest, cfg)
+                for c2 in range(lab2.max() + 1):
+                    Q = rest[lab2 == c2]
+                    if len(Q) < cfg["leftover_min_points"]:
+                        continue
+                    hq = Q @ n + d
+                    tall_grounded = (hq.max() - hq.min() >= cfg["leftover_min_height_m"]
+                                     and hq.min() < cfg["grounded_max_m"])
+                    if cfg.get("_verbose"):
+                        print(f"    [leftover] n={len(Q)} h {hq.min():.2f}..{hq.max():.2f} "
+                              f"centre=({Q[:, 0].mean():+.2f},{Q[:, 2].mean():+.2f}) -> {'kept' if tall_grounded else 'dropped'}")
+                    if tall_grounded:  # a standing thing (chair), not debris around the furniture legs
+                        add(Q, None, L, False, [])
             continue
         ex = [hull_ring(s["hull_uv"], s["H"], e1, e2, n, d) for s in sup]
         add(Pk, np.vstack(ex) if ex else None, L, False, sup)
+    obstacles = merge_fragments(obstacles, floor, o3d, cfg, add_fit=lambda Pk, ex, anch: fit_obstacle(
+        o3d, Pk, floor, cfg, ex, ground=anch))
     obstacles.sort(key=lambda o: o["info"]["range_m"])
     for i, o in enumerate(obstacles):
         o["id"] = i + 1
@@ -1085,16 +1271,25 @@ def analyze_point_cloud(o3d, pts, cfg, segment_fn=None, sensor=None, verbose=Fal
     # ---- points that are neither floor nor wall nor behind a wall
     hgt = pts @ nf + df
     z = -pts[:, 2]
-    sig = noise_sigma(z, cfg)
+    sig = noise_sigma(pts, cfg)
     excl = np.zeros(len(pts), bool)
     excl[floor["idx"]] = True
     for wl in walls:
         excl[wl["idx"]] = True
         wd = pts @ wl["n"] + wl["d"]
         on_or_behind = wd < np.maximum(cfg["wall_band_m"], 2 * sig)
-        excl |= on_or_behind & inside_patch(wl["patch"], pts, cfg["wall_footprint_margin_m"])
-    if walls:
-        z_far = max(float(np.percentile(-pts[wl["idx"], 2], 98)) for wl in walls)
+        excl |= on_or_behind & inside_patch(wl["patch"], ray_crossing(pts, wl), cfg["wall_footprint_margin_m"])
+    # Nothing is accepted beyond the farthest wall - but only a wall that spans most of what the
+    # sensor sees is a back wall. A partition with a doorway is not: things beyond it are real.
+    bear = np.arctan2(pts[:, 0], -pts[:, 2])
+    span_all = max(float(np.percentile(bear, 99) - np.percentile(bear, 1)), 1e-6)
+    z_far = None
+    for wl in walls if span_all < math.radians(cfg["back_wall_max_fov_deg"]) else []:  # not for 360-degree scans
+        bw = bear[wl["idx"]]
+        if (np.percentile(bw, 98) - np.percentile(bw, 2)) / span_all >= cfg["back_wall_coverage"]:
+            zw = float(np.percentile(-pts[wl["idx"], 2], 98))
+            z_far = zw if z_far is None else max(z_far, zw)
+    if z_far is not None:
         excl |= z > z_far + cfg["behind_range_margin_m"]
     cand = (hgt > cfg["obstacle_clearance_m"] + 2 * sig) & (hgt < cfg["max_obstacle_height_m"]) & ~excl
     Pc = pts[cand]
@@ -1106,7 +1301,7 @@ def analyze_point_cloud(o3d, pts, cfg, segment_fn=None, sensor=None, verbose=Fal
         labc = segment_fn(cand) if segment_fn else segment_points_3d(Pc, cfg)
         Pd, Nd, hd, sd, labd = prepare_points(o3d, Pc, labc, floor, cfg)
         supports = find_supports(Pd, Nd, hd, sd, floor, cfg)
-        obstacles, lab = find_obstacles(Pd, Nd, hd, sd, labd, supports, floor, o3d, cfg)
+        obstacles, lab = find_obstacles(Pd, Nd, hd, sd, labd, supports, floor, o3d, cfg, walls=walls)
 
     used = {i for o in obstacles for i in o.get("used", [])}
     supports = [s_ for s_ in supports if id(s_) in used]

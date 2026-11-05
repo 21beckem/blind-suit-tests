@@ -32,7 +32,7 @@
     "max_points": 1000000,
     "visibility_epsilon_m": 0.012,
     "flat_plane_degradation": true,
-    "flat_plane_min_area_m2": 0.25,
+    "flat_plane_min_area_m2": 0.45,
     "flat_plane_dropout": 0.92,
     "flat_plane_center_noise_m": 0.08,
     "flat_plane_edge_noise_m": 0.02,
