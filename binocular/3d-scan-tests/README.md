@@ -15,6 +15,14 @@
 | 4 | `python 04_live_scan.py` | Live tracking + 3D map in a viewer. `S` save, `R` reset, `SPACE` pause, `Q` quit (auto-saves to `scans/`) |
 | 5 | `python 06_view_scan.py` | Opens the newest saved point cloud without using the camera. Pass a scan path or use `--geometry mesh` when needed. |
 
+## Record and replay a scan
+
+Run `python 07_record_scan.py` to capture raw stereo pairs while watching a side-by-side preview. Press Q or Esc to stop. The recording is saved under `recordings/` with frame timestamps, camera settings, calibration, and explicit drop counts. Use `--seconds 60` for a timed recording or `--no-preview` to omit the viewer. Recording does not compute depth or poses.
+
+Run `python 08_process_recording.py recordings/<recording_name> --fps 15` to select frames by their captured timestamps and build one point cloud. Outputs in `processing_runs/` include `scan_replay_points.ply`, `scan_replay_trajectory.npy`, per-frame `frames.csv`, and `summary.json`. Open the cloud with `python 06_view_scan.py processing_runs/<run_name>/scan_replay_points.ply`. The processor runs offline as fast as the computer permits; `--fps` is a maximum selection rate, not a playback delay. Use `--max-frames 50` for a quick trial, `--start-seconds` and `--duration-seconds` for a section, `--fusion points` or `--fusion tsdf` to compare fusion, and `--no-lr-check` to reproduce the live scanner's original depth behavior. The default independent left/right consistency check rejects conflicting depth before fusion.
+
+To inspect depth without any camera tracking or multi-frame fusion, run `python 09_view_recording_frame.py recordings/<recording_name>`. It opens the first recorded pair. Left and Right replace the cloud with the previous or next frame; J and L jump two frames backward or forward. Hold any of these keys to keep advancing as each new cloud finishes loading. F fits the current cloud. Use `--time-seconds 20` or `--frame-id 1234` to start elsewhere, `--no-lr-check` to see unfiltered depth, or `--save-ply frame.ply` to save the initial frame's cloud. The displayed point cloud uses the recording's own calibration and config.
+
 Re-run step 2 whenever you change mode/resolution, swap eyes, or bump/rebuild the module.
 
 ## Single-frame validation
