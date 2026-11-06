@@ -9,6 +9,7 @@
  *   VR.previewNode                   node showing the live image (mount it anywhere)
  *   VR.enter() / VR.leave()          fullscreen VR mode (double-tap also leaves)
  *   VR.paint(grid)                   grid = 2D array [row][col] of 0..1 (null/NaN = no reading)
+ *   VR.paintHUD(grid)                render discrete cells without simulation effects
  *   VR.startStreamingDemoData() / VR.stopStreamingDemoData()
  *
  * Extras: VR.config (copy of current settings), VR.demoRunning, VR.isInVR.
@@ -132,6 +133,11 @@ gl_FragColor=vec4(vec3(v),1.);}`;
         paint(grid) {
             this.stopStreamingDemoData();
             this._push(grid);
+        }
+
+        paintHUD(grid) {
+            this.stopStreamingDemoData();
+            this._push(grid, true);
         }
 
         startStreamingDemoData() {
@@ -326,7 +332,7 @@ gl_FragColor=vec4(vec3(v),1.);}`;
         _closePopup() { if (this._pop) { this._pop.remove(); this._pop = null; } }
 
         /* ---------------- internals: data ---------------- */
-        _push(grid) {
+        _push(grid, discrete = false) {
             const h = Array.isArray(grid) ? grid.length : 0;
             const w = h && Array.isArray(grid[0]) ? grid[0].length : 0;
             if (!w || !grid.every(r => Array.isArray(r) && r.length === w)) {
@@ -338,7 +344,7 @@ gl_FragColor=vec4(vec3(v),1.);}`;
                 const n = grid[y][x];
                 v[y * w + x] = (typeof n === 'number' && isFinite(n)) ? n : NaN;
             }
-            this._hist.push({ t: performance.now(), w, h, v });
+            this._hist.push({ t: performance.now(), w, h, v, discrete });
             if (this._hist.length > 200) this._hist.shift();
         }
 
@@ -346,11 +352,16 @@ gl_FragColor=vec4(vec3(v),1.);}`;
             const c = this.cfg;
             const sw = c.swap, ow = sw ? f.h : f.w, oh = sw ? f.w : f.h;
             let t = new Float32Array(ow * oh);
-            if (c.test) { t.fill(1); }
+            if (c.test && !f.discrete) { t.fill(1); }
             else for (let y = 0; y < oh; y++) for (let x = 0; x < ow; x++) {
                 const sy = c.flipV ? oh - 1 - y : y, sx = c.flipH ? ow - 1 - x : x;
                 const v = sw ? f.v[sx * f.w + sy] : f.v[sy * f.w + sx];
                 t[y * ow + x] = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;
+            }
+            if (f.discrete) {
+                const b = new Uint8Array(t.length);
+                for (let i = 0; i < t.length; i++) b[i] = t[i] >= 0.5 ? 255 : 0;
+                return { w: ow, h: oh, b, discrete: true };
             }
             const m = Math.max(ow, oh), n = c.res;
             if (n > 0 && n < m) {
@@ -456,7 +467,7 @@ gl_FragColor=vec4(vec3(v),1.);}`;
         _draw() {
             const gl = this._gl, c = this.cfg, img = this._img;
             if (this._dirty) {
-                const f = c.smooth ? gl.LINEAR : gl.NEAREST;
+                const f = img.discrete ? gl.NEAREST : (c.smooth ? gl.LINEAR : gl.NEAREST);
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
                 gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, img.w, img.h, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, img.b);
@@ -474,11 +485,11 @@ gl_FragColor=vec4(vec3(v),1.);}`;
             requestAnimationFrame(t => this._loop(t));
             if (!this._gl || !this._canvas.isConnected) return;
             const c = this.cfg;
-            const target = now - c.lag;
+            const target = now - (this._hist.at(-1)?.discrete ? 0 : c.lag);
             let f = null;
             for (let i = this._hist.length - 1; i >= 0; i--) if (this._hist[i].t <= target) { f = this._hist[i]; break; }
             if (!f && c.test) f = { w: 8, h: 8, v: new Float32Array(64) };
-            const gap = c.rate >= 60 ? 0 : 1000 / c.rate;
+            const gap = f?.discrete || c.rate >= 60 ? 0 : 1000 / c.rate;
             if (f && now - this._lastUp >= gap) {
                 this._img = this._process(f, Math.min(0.5, (now - this._lastUp) / 1000));
                 this._lastUp = now;

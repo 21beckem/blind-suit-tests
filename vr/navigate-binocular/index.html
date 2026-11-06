@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Binocular Depth VR</title>
+  <style>
+    body { font: 16px sans-serif; margin: 20px; }
+    button { font: inherit; margin: 4px 0; padding: 6px; }
+    #status { margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <button id="connect">Connect</button>
+  <button onclick="VR.enter();">Enter VR</button>
+  <div id="status">Disconnected</div>
+
+  <script src="../vr.js"></script>
+  <script>
+    VR.enableConfigPopup(true);
+    const connectButton = document.getElementById("connect");
+    const status = document.getElementById("status");
+    let socket;
+    let retryTimer;
+    let shouldConnect = false;
+    let lastFrameMs = 0;
+    let showingUnknown = false;
+    const UNKNOWN_HUD = [[1, 0, 1, 0, 1], [0, 0, 0, 0, 0],
+                         [0, 0, 0, 0, 0], [1, 1, 1, 1, 1]];
+
+    function showUnknown() {
+      if (showingUnknown) return;
+      VR.paintHUD(UNKNOWN_HUD);
+      showingUnknown = true;
+      setStatus("Depth unavailable — stop and check");
+    }
+
+    function validGrid(grid) {
+      return Array.isArray(grid) && grid.length === 4 && grid.every(row =>
+        Array.isArray(row) && row.length === 5 && row.every(v => v === 0 || v === 1));
+    }
+
+    function setStatus(text) {
+      status.textContent = text;
+    }
+
+    function connect() {
+      if (!shouldConnect || (socket && socket.readyState <= WebSocket.OPEN)) return;
+      setStatus("Connecting...");
+      socket = new WebSocket(`ws://${location.hostname || "127.0.0.1"}:5000`);
+      socket.onopen = () => {
+        lastFrameMs = performance.now();
+        setStatus("Waiting for depth");
+        connectButton.textContent = "Disconnect";
+      };
+      socket.onmessage = (event) => {
+        if (typeof event.data !== "string") return;
+        try {
+          const grid = JSON.parse(event.data);
+          if (!validGrid(grid)) throw new Error("Expected a binary 4x5 grid");
+          VR.paintHUD(grid);
+          lastFrameMs = performance.now();
+          showingUnknown = false;
+          setStatus("Receiving navigation HUD");
+        } catch (error) {
+          console.error("Invalid depth grid:", error);
+          showUnknown();
+        }
+      };
+      socket.onerror = () => socket.close();
+      socket.onclose = () => {
+        socket = undefined;
+        showUnknown();
+        if (!shouldConnect) {
+          setStatus("Disconnected");
+          connectButton.textContent = "Connect";
+        } else {
+          setStatus("Retrying...");
+          retryTimer = setTimeout(connect, 1000);
+        }
+      };
+    }
+
+    function disconnect() {
+      shouldConnect = false;
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+      if (socket) socket.close();
+      socket = undefined;
+      showUnknown();
+      setStatus("Disconnected");
+      connectButton.textContent = "Connect";
+    }
+
+    connectButton.addEventListener("click", () => {
+      if (shouldConnect) disconnect();
+      else {
+        shouldConnect = true;
+        connect();
+      }
+    });
+
+    shouldConnect = true;
+    showUnknown();
+    setInterval(() => {
+      if (performance.now() - lastFrameMs > 750) showUnknown();
+    }, 200);
+    connect();
+  </script>
+</body>
+</html>

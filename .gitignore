@@ -2,3 +2,4 @@
 __pycache__
 binocular/3d-scan-tests/recordings/
 binocular/3d-scan-tests/processing_runs/
+vr/binocular/captures/

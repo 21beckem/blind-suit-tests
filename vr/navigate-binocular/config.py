@@ -1,0 +1,11 @@
+OUTPUT_WIDTH = 5
+OUTPUT_HEIGHT = 4
+
+DEPTH_NEAR_METERS = 0.20
+DEPTH_FAR_METERS = 3.0
+
+# Initial walking prototype; tune from recorded and supervised trials.
+PATH_WIDTH_METERS = 0.65
+NEAR_LIMIT_METERS = 1.8
+MIN_OBSERVED_FRACTION = 0.12
+SWITCH_FRAMES = 3
