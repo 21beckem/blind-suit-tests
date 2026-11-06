@@ -11,6 +11,7 @@ from urllib.request import urlopen
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from phone_server import PhonePageHandler
+from hud_protocol import hud_config
 from config import V_ON, V_OFF, ACTION_ROW_STOP, ACTION_ROW_UNKNOWN
 
 
@@ -28,17 +29,18 @@ class PhoneServerTests(unittest.TestCase):
                 renderer = response.read().decode()
             with urlopen(base + "/hud-values.js", timeout=2) as response:
                 values_script = response.read().decode()
-            self.assertIn("location.hostname", page)
+            self.assertIn('value="127.0.0.1:5000"', page)
             self.assertIn("../vr.js", page)
-            self.assertIn("../hud-values.js", page)
+            self.assertNotIn("../hud-values.js", page)
             self.assertIn("paintHUD", renderer)
             self.assertIn("Math.round(t[i] * 255)", renderer)
             self.assertIn(f'"on": {V_ON}', values_script)
             self.assertIn(f'"off": {V_OFF}', values_script)
             self.assertIn(f'"actionStop": {ACTION_ROW_STOP}', values_script)
             self.assertIn(f'"actionUnknown": {ACTION_ROW_UNKNOWN}', values_script)
-            self.assertIn("const UNKNOWN_HUD = [ACTION_ROW_UNKNOWN", page)
-            with patch("phone_server.V_ON", 0.3), patch("phone_server.V_OFF", 0.1):
+            self.assertIn('message.type === "hud-config"', page)
+            self.assertEqual(hud_config()["actionUnknown"], ACTION_ROW_UNKNOWN)
+            with patch("hud_protocol.V_ON", 0.3), patch("hud_protocol.V_OFF", 0.1):
                 with urlopen(base + "/hud-values.js", timeout=2) as response:
                     dim_values = response.read().decode()
             self.assertIn('"on": 0.3', dim_values)

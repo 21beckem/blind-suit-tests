@@ -7,7 +7,7 @@ import json
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from config import V_ON, V_OFF, ACTION_ROW_STOP, ACTION_ROW_UNKNOWN
+from hud_protocol import hud_config
 
 
 VR_DIR = Path(__file__).resolve().parents[1]
@@ -21,9 +21,7 @@ class PhonePageHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/hud-values.js":
             payload = ("window.HUD_VALUES = Object.freeze(" +
-                       json.dumps({"on": V_ON, "off": V_OFF,
-                                   "actionStop": ACTION_ROW_STOP,
-                                   "actionUnknown": ACTION_ROW_UNKNOWN}) + ");\n").encode("utf-8")
+                       json.dumps(hud_config()) + ");\n").encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/javascript; charset=utf-8")
             self.send_header("Cache-Control", "no-store")

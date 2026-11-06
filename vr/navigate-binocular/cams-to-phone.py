@@ -13,11 +13,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 from grid import generate_grid
+from hud_protocol import hud_config
 from navigation import Navigator, fuse_maps
 from stereo_obstacles import StereoObstacles
 from debug_view import render_dashboard
 from tuning_controls import NavigationControls, load_settings, save_settings
-from phone_server import HTTP_PORT, local_addresses, start_page_server
 from config import (
     OUTPUT_WIDTH, OUTPUT_HEIGHT, DEPTH_NEAR_METERS, MAX_AHEAD_METERS,
 )
@@ -164,22 +164,16 @@ def main():
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((HOST, PORT))
     server_socket.listen(1)
-    page_server = None
-
     conn = None
     cam = None
     keep_serving = True
     try:
-        page_server = start_page_server()
-        addresses = local_addresses()
-        for address in addresses:
-            print(f"Open http://{address}:{HTTP_PORT}/ on your phone", flush=True)
-        if not addresses:
-            print(f"Open http://<computer-LAN-IP>:{HTTP_PORT}/ on your phone", flush=True)
-        print(f"Waiting for phone WebSocket on port {PORT}...", flush=True)
+        print("Open the GitHub Pages navigation page on this laptop; stream address: 127.0.0.1:5000", flush=True)
+        print(f"Waiting for browser WebSocket on port {PORT}...", flush=True)
         conn, addr = server_socket.accept()
         accept_websocket(conn)
-        print(f"Connected to phone via: {addr}", flush=True)
+        send_websocket_text(conn, json.dumps(hud_config(), separators=(",", ":")))
+        print(f"Connected to browser via: {addr}", flush=True)
         disconnected = threading.Event()
         threading.Thread(target=monitor_phone, args=(conn, disconnected), daemon=True).start()
 
@@ -281,9 +275,6 @@ def main():
         if conn is not None:
             conn.close()
         server_socket.close()
-        if page_server is not None:
-            page_server.shutdown()
-            page_server.server_close()
         cv2.destroyAllWindows()
         print("Stream closed.", flush=True)
     return keep_serving
@@ -291,4 +282,4 @@ def main():
 
 if __name__ == "__main__":
     while main():
-        print("Phone disconnected; restarting local server...", flush=True)
+        print("Browser disconnected; waiting for a new connection...", flush=True)
