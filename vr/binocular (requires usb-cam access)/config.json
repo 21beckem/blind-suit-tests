@@ -1,0 +1,51 @@
+{
+  "camera": {
+    "mode": "sbs",
+    "index": 1,
+    "index_right": 1,
+    "backend": "dshow",
+    "width": 1280,
+    "height": 480,
+    "fps": 210,
+    "fourcc": "MJPG",
+    "swap_eyes": false,
+    "auto_exposure": null,
+    "exposure": null
+  },
+  "calibration": {
+    "board_cols": 9,
+    "board_rows": 6,
+    "square_mm": 24.4,
+    "num_views": 30
+  },
+  "stereo": {
+    "scale": 1.0,
+    "num_disparities": 80,
+    "block_size": 7,
+    "uniqueness": 17,
+    "speckle_window": 204,
+    "speckle_range": 1,
+    "disp12_max_diff": 1,
+    "pre_filter_cap": 31,
+    "min_depth": 0.3,
+    "max_depth": 4.0,
+    "edge_filter": 0.1,
+    "clahe": false
+  },
+  "scan": {
+    "voxel": 0.02,
+    "sdf_trunc": 0.08,
+    "depth_trunc": 3.5,
+    "key_trans": 0.04,
+    "key_rot_deg": 4.0,
+    "max_step": 0.15,
+    "max_rot_deg": 25.0,
+    "min_valid_ratio": 0.04,
+    "odo_depth_diff": 0.03,
+    "odo_term": "hybrid",
+    "max_keyframes": 8,
+    "live_interval": 1.0,
+    "export_y_up": true,
+    "cleanup_min_triangles": 300
+  }
+}

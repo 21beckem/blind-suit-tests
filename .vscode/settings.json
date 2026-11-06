@@ -1,0 +1,5 @@
+{
+    "search.exclude": {
+        "**/wasm_construction/vendor": true
+    }
+}

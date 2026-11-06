@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Binocular depth test</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #0b111b; color: #e9f0fb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { padding: 20px clamp(16px, 4vw, 48px); border-bottom: 1px solid #27354c; }
+    h1 { margin: 0 0 5px; font-size: clamp(23px, 3vw, 34px); }
+    p { margin: 0; color: #aab9cf; }
+    main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 22px; padding: 22px clamp(16px, 4vw, 48px); max-width: 1800px; margin: auto; }
+    section, aside { min-width: 0; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+    button, select { background: #18253a; color: inherit; border: 1px solid #405473; border-radius: 8px; padding: 8px 11px; font: inherit; cursor: pointer; }
+    button:hover, select:hover { border-color: #74a6e8; }
+    button:disabled { opacity: .5; cursor: default; }
+    select { max-width: 280px; }
+    #status { min-height: 27px; color: #9fd8c0; overflow-wrap: anywhere; }
+    #status[data-kind="error"] { color: #ffadad; }
+    #depth-view { display: block; width: 100%; height: auto; background: #000; border: 1px solid #304059; border-radius: 8px; cursor: crosshair; }
+    .panel-key { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 12px; margin: 7px 0 10px; color: #aab9cf; font-size: 13px; }
+    .metrics { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 10px 0; font-variant-numeric: tabular-nums; color: #cbd7e7; font-size: 14px; }
+    aside { background: #111c2c; border: 1px solid #2b3a52; border-radius: 11px; padding: 18px; align-self: start; }
+    h2 { margin: 0 0 16px; font-size: 18px; }
+    #controls label { display: grid; grid-template-columns: 1fr auto; gap: 4px 9px; margin-bottom: 13px; font-size: 14px; }
+    #controls output { color: #95c7ff; font-variant-numeric: tabular-nums; }
+    #controls input { grid-column: 1 / -1; width: 100%; accent-color: #77b5ff; }
+    .toggle { display: block; margin: 13px 0; font-size: 14px; }
+    .toggle input { accent-color: #77b5ff; }
+    .hint { font-size: 13px; line-height: 1.5; margin-top: 18px; }
+    #camera-video { display: block; width: min(100%, 260px); height: auto; margin-top: 12px; border: 1px solid #304059; border-radius: 6px; background: #000; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { max-width: none; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Binocular depth test</h1>
+    <p>Live rectification and metric depth from the side-by-side camera.</p>
+  </header>
+  <main>
+    <section aria-label="Live depth view">
+      <div class="toolbar">
+        <select id="camera" aria-label="Camera"></select>
+        <button id="start" disabled>Start camera</button>
+        <button id="sample-pair" disabled>Test saved pair</button>
+        <button id="freeze" disabled>Freeze</button>
+        <button id="save" disabled>Save settings</button>
+      </div>
+      <div id="status" role="status">Starting…</div>
+      <canvas id="depth-view" aria-label="Rectified left and right views, disparity, and depth"></canvas>
+      <div class="panel-key"><span>Rectified left</span><span>Rectified right</span><span>Disparity</span><span>Depth (red is near)</span></div>
+      <div class="metrics"><span id="geometry"></span><span id="camera-rate"></span></div>
+      <div class="metrics"><span id="depth-stats"></span><span id="sample">Click a panel to measure depth.</span></div>
+      <div class="metrics"><span id="timings"></span></div>
+      <video id="camera-video" autoplay playsinline muted aria-label="Raw side-by-side camera preview"></video>
+    </section>
+    <aside aria-label="Stereo settings">
+      <h2>Stereo settings</h2>
+      <div id="controls"></div>
+      <label class="toggle"><input id="clahe" type="checkbox"> Apply CLAHE</label>
+      <label class="toggle"><input id="swap_eyes" type="checkbox"> Swap eyes</label>
+      <p class="hint">Space freezes the pair · C toggles CLAHE · S saves settings · Q stops the camera. Settings are kept in this browser and downloaded as a JSON file.</p>
+    </aside>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

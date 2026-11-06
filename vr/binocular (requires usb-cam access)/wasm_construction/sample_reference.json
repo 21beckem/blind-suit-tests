@@ -1,0 +1,11 @@
+{
+  "recording": "recording_dining_table",
+  "frame_id": 100,
+  "image_size": [
+    640,
+    480
+  ],
+  "valid_percent": 61.32226562500001,
+  "median_depth_m": 2.897881269454956,
+  "center_5x5_m": 3.0588746070861816
+}
