@@ -10,6 +10,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from grid import generate_grid
+from config import OUTPUT_WIDTH, OUTPUT_HEIGHT, DEPTH_NEAR_METERS, DEPTH_FAR_METERS
 
 
 # Import the tested binocular camera/calibration implementation.
@@ -22,13 +24,6 @@ from common import Calibration, Rectifier, StereoCamera, StereoMatcher, load_con
 
 HOST = "127.0.0.1"
 PORT = 5000
-
-# Output grid sent to VR.paint(). Change these values to match the desired phone
-# resolution. The mapping is linear: near depth is full brightness, far depth is 0.
-OUTPUT_WIDTH = 8
-OUTPUT_HEIGHT = 8
-DEPTH_NEAR_METERS = 0.20
-DEPTH_FAR_METERS = 3.0
 
 DISPLAY_DEPTH_ALONGSIDE_CAMERA = True
 DISPLAY_AT_INPUT_RESOLUTION = True
@@ -128,27 +123,6 @@ def monitor_phone(conn, disconnected):
         disconnected.set()
 
 
-def depth_to_grid(depth):
-    """Convert metric depth to VR brightness, with invalid pixels mapped to 0."""
-    grid = np.zeros(depth.shape, dtype=np.float32)
-    valid = np.isfinite(depth) & (depth > 0)
-    if DEPTH_FAR_METERS <= DEPTH_NEAR_METERS:
-        raise ValueError("DEPTH_FAR_METERS must be greater than DEPTH_NEAR_METERS")
-    grid[valid] = (DEPTH_FAR_METERS - depth[valid]) / (DEPTH_FAR_METERS - DEPTH_NEAR_METERS)
-    grid[valid] = np.clip(grid[valid], 0.0, 1.0)
-    return grid
-
-
-def downsample_depth_grid(depth):
-    """Average valid depth brightness per cell; leave cells with no readings dark."""
-    size = (OUTPUT_WIDTH, OUTPUT_HEIGHT)
-    valid = (np.isfinite(depth) & (depth > 0)).astype(np.float32)
-    brightness = depth_to_grid(depth)
-    sums = cv2.resize(brightness, size, interpolation=cv2.INTER_AREA)
-    counts = cv2.resize(valid, size, interpolation=cv2.INTER_AREA)
-    return np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
-
-
 def main():
     cfg = load_config()
     stereo_cfg = dict(cfg["stereo"])
@@ -210,7 +184,7 @@ def main():
                 # orientation. Rotate their aligned results for upside-down use.
                 depth = cv2.rotate(depth, cv2.ROTATE_180)
                 display_left = cv2.rotate(display_left, cv2.ROTATE_180)
-            grid = downsample_depth_grid(depth)
+            grid = generate_grid(depth)
             send_websocket_text(conn, json.dumps(grid.tolist(), separators=(",", ":")))
 
             if DISPLAY_DEPTH_ALONGSIDE_CAMERA:
