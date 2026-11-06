@@ -19,7 +19,7 @@
   <script src="../hud-values.js"></script>
   <script>
     VR.enableConfigPopup(true);
-    const {on: V_ON, off: V_OFF} = window.HUD_VALUES;
+    const {on: V_ON, off: V_OFF, actionUnknown: ACTION_ROW_UNKNOWN} = window.HUD_VALUES;
     const connectButton = document.getElementById("connect");
     const status = document.getElementById("status");
     let socket;
@@ -27,7 +27,7 @@
     let shouldConnect = false;
     let lastFrameMs = 0;
     let showingUnknown = false;
-    const UNKNOWN_HUD = [[V_ON, V_OFF, V_ON, V_OFF, V_ON],
+    const UNKNOWN_HUD = [ACTION_ROW_UNKNOWN,
                          Array(5).fill(V_OFF), Array(5).fill(V_OFF),
                          Array(5).fill(V_ON)];
 

@@ -4,15 +4,15 @@
 
 Run `python vr/navigate-binocular/cams-to-phone.py` on the computer. It prints one or more local addresses such as `http://192.168.1.42:8000/`; open the address on the same network as your phone. The phone and computer need to be on the same local Wi-Fi network or hotspot, but the network does not need internet access. The script serves the page and `vr.js` on port 8000 and streams the HUD on port 5000. If it lists multiple addresses, use the Wi-Fi adapter's IPv4 address from `ipconfig`. If Windows asks for firewall access, allow it on the local/private network. You can run `python vr/navigate-binocular/phone_server.py` to test page loading without starting the camera; its HUD will correctly say depth is unavailable.
 
-`cams-to-phone.py` turns stereo depth into a two-level 5×4 walking cue. `V_ON` and `V_OFF` in `config.py` are the single source for the two brightness values. The `1` and `0` patterns below describe which cells are on and off; for example, setting `V_ON = 0.3` dims every on cell without changing the pattern. Restart the server and reload the phone page after changing these constants. The pipeline is:
+`cams-to-phone.py` turns stereo depth into a two-level 5×4 walking cue. `V_ON` and `V_OFF` in `config.py` are the single source for the two brightness values. `ACTION_ROW_STOP` and `ACTION_ROW_UNKNOWN` define the two special top-row patterns. The `1` and `0` patterns below describe which cells are on and off; for example, setting `V_ON = 0.3` dims every on cell without changing the pattern. Restart the server and reload the phone page after changing these constants. The pipeline is:
 
 1. `stereo_obstacles.py` projects depth into a local metric `LocalMap` and estimates a floor. Obstacles and measured floor are separate; missing depth remains unknown.
-2. `navigation.py` fuses sensor maps and checks five person-wide forward corridors. A near hazard in the current corridor means stop. Otherwise it prefers forward and then a known, unobstructed side corridor.
+2. `navigation.py` fuses sensor maps and checks five person-wide forward corridors. A persistent hazard inside the stop distance in the current corridor means stop. Otherwise it prefers forward and then a known, unobstructed side corridor. HUD changes settle for configurable milliseconds before appearing.
 3. `grid.py` encodes the decision as four rows of `V_ON`/`V_OFF`. `cams-to-phone.py` sends the same two-dimensional JSON array used by the existing phone page.
 
 | Row | Meaning |
 | --- | --- |
-| 1 | One lit column = suggested direction, left to right. `11111` = stop; `10101` = cannot judge, stop and check. |
+| 1 | One lit column = suggested direction, left to right. `11111` = stop; `00000` = cannot judge, stop and check. |
 | 2 | Blocked within the near reaction zone. |
 | 3 | Blocked farther ahead. |
 | 4 | Insufficient coverage to judge that direction. |
@@ -28,7 +28,7 @@ The `Binocular Navigation Debug` window displays four synchronized views of each
 - **Local map:** green cells contain measured floor, red cells contain hazards, and gray cells remain unknown. White lines are the five candidate walking directions; yellow is the selected direction.
 - **Exact HUD:** the 5×4 bits sent to the phone, decision reason, corridor coverage percentages, and timing. A message gap above 750 ms is highlighted because the phone may show its own unknown pattern while waiting.
 
-When the top row is `10101`, check the floor-fit status and near/far coverage to see why no route was verified. When it is `11111`, the reason distinguishes a hazard within the stop distance from all corridors being blocked. The phone can also show `10101` by itself on a connection or frame timeout; its text status says `Depth unavailable` in that case.
+When the top row is `00000`, check the floor-fit status and near/far coverage to see why no route was verified. It also appears briefly while a possible STOP is being checked. When it is `11111`, the reason distinguishes a hazard within the stop distance from all corridors being blocked. The phone also shows `00000` on a connection or frame timeout; its text status says `Depth unavailable` in that case.
 
 ## Live tuning
 
@@ -36,15 +36,22 @@ The `Navigation Controls` window has sliders that apply to the next processed fr
 
 | Slider | Effect |
 | --- | --- |
-| Stop distance | A center-corridor hazard closer than this triggers `11111` immediately. Other blocked-route conditions can also trigger `11111`. |
+| Stop distance | A center-corridor hazard closer than this proposes STOP. It appears after the add-stop delay. Other blocked-route conditions can also propose STOP. |
 | Near distance | End of the near hazard band (HUD row 2). |
 | Ahead distance | End of the ahead hazard band (HUD row 3), up to the 4 m sensor limit. |
 | Path width | Width of each candidate walking corridor. |
 | Min coverage | Fraction of each near/ahead corridor that must have floor or hazard evidence before it is treated as known. |
 | Obstacle points per cell | Minimum depth pixels classified as hazards in a local-map cell before that cell is blocked. |
-| Direction switch frames | Frames before changing between two viable directions. Immediate STOP is never delayed. |
+| Add obstacle ms | Continuous hazard evidence required before a near/ahead cell lights up. A hazard inside the stop distance uses the separate add-stop delay. |
+| Remove obstacle ms | Continuous clear evidence required before a near/ahead cell turns off. |
+| Add unknown ms | Continuous loss of coverage required before an unknown cell lights up. |
+| Remove unknown ms | Continuous restored coverage required before an unknown cell turns off. |
+| Add path ms | Time a newly clear corridor must stay clear before it can be suggested. While waiting, the top row shows `00000` if no other path is ready. |
+| Path choice ms | Time a preferred direction must persist before changing from a still-viable direction. An obstructed current direction is abandoned immediately after its obstacle is confirmed. |
+| Add stop ms | Continuous STOP evidence required before showing `11111`. While checking, the top row shows `00000` instead of suggesting a direction. The default is 50 ms. |
+| Release stop ms | Time a STOP condition must stay absent before the STOP cue clears. |
 
-The distance sliders enforce `stop < near < ahead` with at least 20 cm between adjacent thresholds. The effective values appear on the depth panel. Press `s` to save the current settings in `navigation_settings.json` for the next run, or `d` to restore defaults. Press `r` to capture a depth frame with the current settings, and `q` or Esc to quit. Settings saved with a capture are used when that frame is replayed.
+The distance sliders enforce `stop < near < ahead` with at least 20 cm between adjacent thresholds. All debounce sliders are in milliseconds; zero applies a change immediately. The current thresholds and path-choice delay appear on the depth panel. Press `s` to save the current settings in `navigation_settings.json` for the next run, or `d` to restore defaults. Press `r` to capture a depth frame with the current settings, and `q` or Esc to quit. Settings saved with a capture are used when that frame is replayed. Existing settings files with `switch_frames` load with the new debounce defaults; save again to store the new values.
 
 The first thresholds are in `config.py`. They require tuning with actual captures and supervised walking trials. Floor fitting needs visible, measurable ground. A flat-looking image or zero stereo depth does not establish free space. The camera does not cover the ground directly underfoot, behind objects, or outside its field of view. The HUD must therefore be treated as a prototype walking aid, not a guarantee that any route is safe.
 

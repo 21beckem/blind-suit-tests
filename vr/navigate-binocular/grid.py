@@ -1,5 +1,5 @@
 import numpy as np
-from config import OUTPUT_WIDTH, OUTPUT_HEIGHT, V_ON, V_OFF
+from config import OUTPUT_WIDTH, OUTPUT_HEIGHT, V_ON, V_OFF, ACTION_ROW_STOP, ACTION_ROW_UNKNOWN
 
 
 def generate_grid(decision):
@@ -12,9 +12,9 @@ def generate_grid(decision):
     if decision.action == "direction":
         grid[0, decision.direction] = V_ON
     elif decision.action == "stop":
-        grid[0] = V_ON
+        grid[0] = ACTION_ROW_STOP
     elif decision.action == "unknown":
-        grid[0, ::2] = V_ON
+        grid[0] = ACTION_ROW_UNKNOWN
     else:
         raise ValueError("unknown navigation action")
     grid[1] = np.where(decision.near, V_ON, V_OFF)

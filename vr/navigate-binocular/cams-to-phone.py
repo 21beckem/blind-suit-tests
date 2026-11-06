@@ -39,14 +39,7 @@ ROTATE_CAMERA_180 = True
 
 
 def make_navigator(settings):
-    return Navigator(
-        path_width=settings.path_width,
-        stop_distance=settings.stop_distance,
-        near_limit=settings.near_distance,
-        ahead_limit=settings.ahead_distance,
-        min_observed_fraction=settings.min_coverage,
-        switch_frames=settings.switch_frames,
-    )
+    return Navigator(**settings.navigator_kwargs())
 
 
 def receive_exactly(conn, size):

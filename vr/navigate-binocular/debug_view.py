@@ -61,7 +61,7 @@ def _depth_panel(depth, debug, near, far, settings):
               12, 283, 0.57)
         _text(panel, f"Width {settings.path_width:.2f}m   Coverage {settings.min_coverage:.0%}",
               12, 312, 0.55)
-        _text(panel, f"Obstacle points {settings.hazard_points}   Switch frames {settings.switch_frames}",
+        _text(panel, f"Obs pts {settings.hazard_points}   Stop {settings.debounce_add_stop_ms}/{settings.debounce_release_stop_ms}ms   Choice {settings.debounce_path_choice_ms}ms",
               12, 340, 0.55)
     return panel
 

@@ -14,14 +14,14 @@ from config import DEPTH_NEAR_METERS, MAX_AHEAD_METERS, V_ON, V_OFF
 from grid import generate_grid
 from navigation import Navigator
 from stereo_obstacles import StereoObstacles
-from tuning_controls import TuningValues, load_settings
+from tuning_controls import settings_from_dict, load_settings
 
 
 def replay(path, show=False):
     with np.load(path) as sample:
         depth = sample["depth"]
         fx, fy, cx, cy = (float(sample[name]) for name in ("fx", "fy", "cx", "cy"))
-        settings = TuningValues(**json.loads(str(sample["settings"]))) if "settings" in sample else load_settings()
+        settings = settings_from_dict(json.loads(str(sample["settings"]))) if "settings" in sample else load_settings()
     if depth.ndim == 2:
         depth = depth[None, ...]
     observer = StereoObstacles(
@@ -29,12 +29,7 @@ def replay(path, show=False):
         near=DEPTH_NEAR_METERS, far=MAX_AHEAD_METERS,
         min_hazard_points=settings.hazard_points,
     )
-    navigator = Navigator(path_width=settings.path_width,
-                          stop_distance=settings.stop_distance,
-                          near_limit=settings.near_distance,
-                          ahead_limit=settings.ahead_distance,
-                          min_observed_fraction=settings.min_coverage,
-                          switch_frames=settings.switch_frames)
+    navigator = Navigator(**settings.navigator_kwargs())
     for number, frame in enumerate(depth):
         scene = observer.observe(frame)
         decision = navigator.decide(scene)

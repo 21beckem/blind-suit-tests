@@ -9,7 +9,11 @@ import numpy as np
 
 from config import (
     DEPTH_FAR_METERS, PATH_WIDTH_METERS, STOP_DISTANCE_METERS,
-    NEAR_LIMIT_METERS, MIN_OBSERVED_FRACTION, MIN_HAZARD_POINTS, SWITCH_FRAMES,
+    NEAR_LIMIT_METERS, MIN_OBSERVED_FRACTION, MIN_HAZARD_POINTS,
+    DEBOUNCE_ADD_OBSTACLE_MS, DEBOUNCE_REMOVE_OBSTACLE_MS,
+    DEBOUNCE_ADD_UNKNOWN_MS, DEBOUNCE_REMOVE_UNKNOWN_MS,
+    DEBOUNCE_ADD_PATH_MS, DEBOUNCE_PATH_CHOICE_MS,
+    DEBOUNCE_ADD_STOP_MS, DEBOUNCE_RELEASE_STOP_MS,
 )
 
 
@@ -25,7 +29,14 @@ class TuningValues:
     path_width: float = PATH_WIDTH_METERS
     min_coverage: float = MIN_OBSERVED_FRACTION
     hazard_points: int = MIN_HAZARD_POINTS
-    switch_frames: int = SWITCH_FRAMES
+    debounce_add_obstacle_ms: int = DEBOUNCE_ADD_OBSTACLE_MS
+    debounce_remove_obstacle_ms: int = DEBOUNCE_REMOVE_OBSTACLE_MS
+    debounce_add_unknown_ms: int = DEBOUNCE_ADD_UNKNOWN_MS
+    debounce_remove_unknown_ms: int = DEBOUNCE_REMOVE_UNKNOWN_MS
+    debounce_add_path_ms: int = DEBOUNCE_ADD_PATH_MS
+    debounce_path_choice_ms: int = DEBOUNCE_PATH_CHOICE_MS
+    debounce_add_stop_ms: int = DEBOUNCE_ADD_STOP_MS
+    debounce_release_stop_ms: int = DEBOUNCE_RELEASE_STOP_MS
 
     def __post_init__(self):
         if not (0.4 <= self.stop_distance <= 2.5
@@ -34,15 +45,47 @@ class TuningValues:
                 and 0.4 <= self.path_width <= 1.2
                 and 0.05 <= self.min_coverage <= 0.6
                 and 1 <= self.hazard_points <= 30
-                and 1 <= self.switch_frames <= 10):
+                and all(isinstance(value, int) and 0 <= value <= 2000
+                        for value in (self.debounce_add_obstacle_ms,
+                                      self.debounce_remove_obstacle_ms,
+                                      self.debounce_add_unknown_ms,
+                                      self.debounce_remove_unknown_ms,
+                                      self.debounce_add_path_ms,
+                                      self.debounce_path_choice_ms,
+                                      self.debounce_add_stop_ms,
+                                      self.debounce_release_stop_ms))):
             raise ValueError("navigation settings are outside supported ranges")
+
+    def navigator_kwargs(self):
+        return dict(
+            path_width=self.path_width,
+            stop_distance=self.stop_distance,
+            near_limit=self.near_distance,
+            ahead_limit=self.ahead_distance,
+            min_observed_fraction=self.min_coverage,
+            debounce_add_obstacle_ms=self.debounce_add_obstacle_ms,
+            debounce_remove_obstacle_ms=self.debounce_remove_obstacle_ms,
+            debounce_add_unknown_ms=self.debounce_add_unknown_ms,
+            debounce_remove_unknown_ms=self.debounce_remove_unknown_ms,
+            debounce_add_path_ms=self.debounce_add_path_ms,
+            debounce_path_choice_ms=self.debounce_path_choice_ms,
+            debounce_add_stop_ms=self.debounce_add_stop_ms,
+            debounce_release_stop_ms=self.debounce_release_stop_ms,
+        )
+
+
+def settings_from_dict(data):
+    """Load captures/settings made before frame-based switching was removed."""
+    data = dict(data)
+    data.pop("switch_frames", None)
+    return TuningValues(**data)
 
 
 def load_settings(path=SETTINGS_PATH):
     if not path.exists():
         return TuningValues()
     try:
-        return TuningValues(**json.loads(path.read_text(encoding="utf-8")))
+        return settings_from_dict(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError) as exc:
         print(f"Ignoring invalid navigation settings: {exc}", flush=True)
         return TuningValues()
@@ -60,7 +103,14 @@ class NavigationControls:
         ("Path width cm", "path_width", 100, 120),
         ("Min coverage percent", "min_coverage", 100, 60),
         ("Obstacle points per cell", "hazard_points", 1, 30),
-        ("Direction switch frames", "switch_frames", 1, 10),
+        ("Add obstacle ms", "debounce_add_obstacle_ms", 1, 2000),
+        ("Remove obstacle ms", "debounce_remove_obstacle_ms", 1, 2000),
+        ("Add unknown ms", "debounce_add_unknown_ms", 1, 2000),
+        ("Remove unknown ms", "debounce_remove_unknown_ms", 1, 2000),
+        ("Add path ms", "debounce_add_path_ms", 1, 2000),
+        ("Path choice ms", "debounce_path_choice_ms", 1, 2000),
+        ("Add stop ms", "debounce_add_stop_ms", 1, 2000),
+        ("Release stop ms", "debounce_release_stop_ms", 1, 2000),
     )
 
     def __init__(self, values):
@@ -74,7 +124,7 @@ class NavigationControls:
         for label, field, scale, maximum in self.TRACKBARS:
             cv2.createTrackbar(label, WINDOW, round(getattr(values, field) * scale), maximum,
                                lambda _position: None)
-        cv2.resizeWindow(WINDOW, 700, 440)
+        cv2.resizeWindow(WINDOW, 700, 760)
 
     def reset(self):
         values = TuningValues()
@@ -94,7 +144,14 @@ class NavigationControls:
             path_width=round(max(0.4, raw["path_width"]), 2),
             min_coverage=round(max(0.05, raw["min_coverage"]), 2),
             hazard_points=max(1, int(raw["hazard_points"])),
-            switch_frames=max(1, int(raw["switch_frames"])),
+            debounce_add_obstacle_ms=int(raw["debounce_add_obstacle_ms"]),
+            debounce_remove_obstacle_ms=int(raw["debounce_remove_obstacle_ms"]),
+            debounce_add_unknown_ms=int(raw["debounce_add_unknown_ms"]),
+            debounce_remove_unknown_ms=int(raw["debounce_remove_unknown_ms"]),
+            debounce_add_path_ms=int(raw["debounce_add_path_ms"]),
+            debounce_path_choice_ms=int(raw["debounce_path_choice_ms"]),
+            debounce_add_stop_ms=int(raw["debounce_add_stop_ms"]),
+            debounce_release_stop_ms=int(raw["debounce_release_stop_ms"]),
         )
         # Keep the sliders honest when a dependent distance is raised.
         for label, field, scale, _maximum in self.TRACKBARS:
