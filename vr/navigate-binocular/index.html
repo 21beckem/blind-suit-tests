@@ -16,8 +16,10 @@
   <div id="status">Disconnected</div>
 
   <script src="../vr.js"></script>
+  <script src="../hud-values.js"></script>
   <script>
     VR.enableConfigPopup(true);
+    const {on: V_ON, off: V_OFF} = window.HUD_VALUES;
     const connectButton = document.getElementById("connect");
     const status = document.getElementById("status");
     let socket;
@@ -25,8 +27,9 @@
     let shouldConnect = false;
     let lastFrameMs = 0;
     let showingUnknown = false;
-    const UNKNOWN_HUD = [[1, 0, 1, 0, 1], [0, 0, 0, 0, 0],
-                         [0, 0, 0, 0, 0], [1, 1, 1, 1, 1]];
+    const UNKNOWN_HUD = [[V_ON, V_OFF, V_ON, V_OFF, V_ON],
+                         Array(5).fill(V_OFF), Array(5).fill(V_OFF),
+                         Array(5).fill(V_ON)];
 
     function showUnknown() {
       if (showingUnknown) return;
@@ -37,7 +40,9 @@
 
     function validGrid(grid) {
       return Array.isArray(grid) && grid.length === 4 && grid.every(row =>
-        Array.isArray(row) && row.length === 5 && row.every(v => v === 0 || v === 1));
+        Array.isArray(row) && row.length === 5 && row.every(v =>
+          typeof v === "number" && Number.isFinite(v) &&
+          (Math.abs(v - V_OFF) < 0.00001 || Math.abs(v - V_ON) < 0.00001)));
     }
 
     function setStatus(text) {
@@ -57,7 +62,7 @@
         if (typeof event.data !== "string") return;
         try {
           const grid = JSON.parse(event.data);
-          if (!validGrid(grid)) throw new Error("Expected a binary 4x5 grid");
+          if (!validGrid(grid)) throw new Error("Expected a 4x5 HUD grid");
           VR.paintHUD(grid);
           lastFrameMs = performance.now();
           showingUnknown = false;

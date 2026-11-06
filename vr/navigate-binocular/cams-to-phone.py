@@ -7,6 +7,7 @@ import socket
 import sys
 import threading
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import cv2
@@ -14,10 +15,11 @@ import numpy as np
 from grid import generate_grid
 from navigation import Navigator, fuse_maps
 from stereo_obstacles import StereoObstacles
+from debug_view import render_dashboard
+from tuning_controls import NavigationControls, load_settings, save_settings
 from phone_server import HTTP_PORT, local_addresses, start_page_server
 from config import (
-    OUTPUT_WIDTH, OUTPUT_HEIGHT, DEPTH_NEAR_METERS, DEPTH_FAR_METERS,
-    PATH_WIDTH_METERS, NEAR_LIMIT_METERS, MIN_OBSERVED_FRACTION, SWITCH_FRAMES,
+    OUTPUT_WIDTH, OUTPUT_HEIGHT, DEPTH_NEAR_METERS, MAX_AHEAD_METERS,
 )
 
 
@@ -33,8 +35,18 @@ HOST = "0.0.0.0"
 PORT = 5000
 
 DISPLAY_DEPTH_ALONGSIDE_CAMERA = True
-DISPLAY_AT_INPUT_RESOLUTION = True
 ROTATE_CAMERA_180 = True
+
+
+def make_navigator(settings):
+    return Navigator(
+        path_width=settings.path_width,
+        stop_distance=settings.stop_distance,
+        near_limit=settings.near_distance,
+        ahead_limit=settings.ahead_distance,
+        min_observed_fraction=settings.min_coverage,
+        switch_frames=settings.switch_frames,
+    )
 
 
 def receive_exactly(conn, size):
@@ -136,7 +148,7 @@ def main():
     # Keep the configured mapping endpoints measurable even if config.json has a
     # narrower matcher range (the checked-in config currently starts at 0.30 m).
     stereo_cfg["min_depth"] = min(float(stereo_cfg["min_depth"]), DEPTH_NEAR_METERS)
-    stereo_cfg["max_depth"] = max(float(stereo_cfg["max_depth"]), DEPTH_FAR_METERS)
+    stereo_cfg["max_depth"] = max(float(stereo_cfg["max_depth"]), MAX_AHEAD_METERS)
 
     calib = Calibration()
     rect = Rectifier(calib, stereo_cfg["scale"])
@@ -150,7 +162,7 @@ def main():
             OUTPUT_WIDTH,
             OUTPUT_HEIGHT,
             DEPTH_NEAR_METERS,
-            DEPTH_FAR_METERS,
+            MAX_AHEAD_METERS,
         ),
         flush=True,
     )
@@ -179,21 +191,26 @@ def main():
         threading.Thread(target=monitor_phone, args=(conn, disconnected), daemon=True).start()
 
         cam = StereoCamera(cfg["camera"]).start()
-        navigator = Navigator(
-            path_width=PATH_WIDTH_METERS,
-            near_limit=NEAR_LIMIT_METERS,
-            min_observed_fraction=MIN_OBSERVED_FRACTION,
-            switch_frames=SWITCH_FRAMES,
-        )
+        settings = load_settings()
+        navigator = make_navigator(settings)
+        controls = NavigationControls(settings) if DISPLAY_DEPTH_ALONGSIDE_CAMERA else None
         observer = None
         last_id = -1
+        last_send_at = None
         while not disconnected.is_set():
             item = cam.read(last_id, timeout=1.0)
             if item is None:
                 continue
-            left, right, _timestamp, last_id = item
+            if controls is not None:
+                updated = controls.read()
+                if updated != settings:
+                    settings = updated
+                    navigator = make_navigator(settings)
+            left, right, capture_timestamp, last_id = item
+            frame_start = time.perf_counter()
             rectified_left, rectified_right = rect.rectify(left, right)
             _disparity, depth = matcher.compute(rectified_left, rectified_right)
+            stereo_ms = (time.perf_counter() - frame_start) * 1000
 
             # StereoSGBM cannot search for matches in the leftmost disparity
             # range. Crop the same margin from the image and depth so the
@@ -215,28 +232,35 @@ def main():
                 observer = StereoObstacles(
                     fx=rect.fx, fy=rect.fy, cx=cx, cy=cy,
                     width=depth.shape[1], height=depth.shape[0],
-                    near=DEPTH_NEAR_METERS, far=DEPTH_FAR_METERS,
+                    near=DEPTH_NEAR_METERS, far=MAX_AHEAD_METERS,
+                    min_hazard_points=settings.hazard_points,
                 )
+            observer.min_hazard_points = settings.hazard_points
+            observe_start = time.perf_counter()
             scene = fuse_maps([observer.observe(depth)])
             decision = navigator.decide(scene)
             grid = generate_grid(decision)
+            observe_ms = (time.perf_counter() - observe_start) * 1000
             send_websocket_text(conn, json.dumps(grid.tolist(), separators=(",", ":")))
+            sent_at = time.monotonic()
+            message_gap_ms = 0 if last_send_at is None else (sent_at - last_send_at) * 1000
+            last_send_at = sent_at
 
             if DISPLAY_DEPTH_ALONGSIDE_CAMERA:
-                display_depth = cv2.applyColorMap(
-                    np.round(grid * 255).astype(np.uint8), cv2.COLORMAP_INFERNO
+                stats = {
+                    "camera_fps": cam.fps,
+                    "frame_age_ms": max(0, (time.time() - capture_timestamp) * 1000),
+                    "stereo_ms": stereo_ms,
+                    "observe_ms": observe_ms,
+                    "total_ms": (time.perf_counter() - frame_start) * 1000,
+                    "message_gap_ms": message_gap_ms,
+                }
+                display = render_dashboard(
+                    display_left, depth, scene, decision, grid, observer.debug, stats,
+                    near=DEPTH_NEAR_METERS, far=MAX_AHEAD_METERS,
+                    settings=settings,
                 )
-                display_left = cv2.cvtColor(display_left, cv2.COLOR_GRAY2BGR)
-                display_depth = cv2.resize(
-                    display_depth,
-                    (display_left.shape[1], display_left.shape[0]),
-                    interpolation=cv2.INTER_NEAREST,
-                )
-                if not DISPLAY_AT_INPUT_RESOLUTION:
-                    display_left = cv2.resize(display_left, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
-                    display_depth = cv2.resize(display_depth, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
-                display = np.hstack((display_left, display_depth))
-                cv2.imshow("Binocular Depth -> Phone", display)
+                cv2.imshow("Binocular Navigation Debug", display)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("r"):
                     capture_dir = Path(__file__).resolve().parent / "captures"
@@ -245,8 +269,16 @@ def main():
                     np.savez_compressed(
                         capture_path, depth=depth, fx=observer.fx, fy=observer.fy,
                         cx=observer.cx, cy=observer.cy,
+                        settings=json.dumps(asdict(settings)),
                     )
                     print(f"Saved depth sample: {capture_path}", flush=True)
+                if key == ord("s"):
+                    save_settings(settings)
+                    print("Saved navigation settings", flush=True)
+                if key == ord("d") and controls is not None:
+                    settings = controls.reset()
+                    navigator = make_navigator(settings)
+                    observer.min_hazard_points = settings.hazard_points
                 if key in (ord("q"), 27):
                     keep_serving = False
                     break

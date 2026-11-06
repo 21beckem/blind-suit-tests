@@ -4,41 +4,47 @@ Usage: python replay_navigation.py captures/depth-....npz [--show]
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from config import DEPTH_NEAR_METERS, DEPTH_FAR_METERS, PATH_WIDTH_METERS
-from config import NEAR_LIMIT_METERS, MIN_OBSERVED_FRACTION, SWITCH_FRAMES
+from config import DEPTH_NEAR_METERS, MAX_AHEAD_METERS, V_ON, V_OFF
 from grid import generate_grid
 from navigation import Navigator
 from stereo_obstacles import StereoObstacles
+from tuning_controls import TuningValues, load_settings
 
 
 def replay(path, show=False):
     with np.load(path) as sample:
         depth = sample["depth"]
         fx, fy, cx, cy = (float(sample[name]) for name in ("fx", "fy", "cx", "cy"))
+        settings = TuningValues(**json.loads(str(sample["settings"]))) if "settings" in sample else load_settings()
     if depth.ndim == 2:
         depth = depth[None, ...]
     observer = StereoObstacles(
         fx=fx, fy=fy, cx=cx, cy=cy, width=depth.shape[2], height=depth.shape[1],
-        near=DEPTH_NEAR_METERS, far=DEPTH_FAR_METERS,
+        near=DEPTH_NEAR_METERS, far=MAX_AHEAD_METERS,
+        min_hazard_points=settings.hazard_points,
     )
-    navigator = Navigator(path_width=PATH_WIDTH_METERS, near_limit=NEAR_LIMIT_METERS,
-                          min_observed_fraction=MIN_OBSERVED_FRACTION,
-                          switch_frames=SWITCH_FRAMES)
+    navigator = Navigator(path_width=settings.path_width,
+                          stop_distance=settings.stop_distance,
+                          near_limit=settings.near_distance,
+                          ahead_limit=settings.ahead_distance,
+                          min_observed_fraction=settings.min_coverage,
+                          switch_frames=settings.switch_frames)
     for number, frame in enumerate(depth):
         scene = observer.observe(frame)
         decision = navigator.decide(scene)
         grid = generate_grid(decision)
-        print(f"frame {number}: {decision.action} {decision.direction if decision.direction is not None else ''}")
-        for row in grid.astype(int):
-            print("".join(map(str, row)))
+        print(f"frame {number}: {decision.action} {decision.direction if decision.direction is not None else ''} (on={V_ON:g}, off={V_OFF:g})")
+        for row in grid:
+            print("".join("1" if abs(value - V_ON) < abs(value - V_OFF) else "0" for value in row))
         if not show:
             continue
-        scale = np.clip(frame / DEPTH_FAR_METERS, 0, 1)
+        scale = np.clip(frame / MAX_AHEAD_METERS, 0, 1)
         depth_image = cv2.applyColorMap(np.uint8(scale * 255), cv2.COLORMAP_TURBO)
         depth_image[frame <= 0] = (0, 0, 0)
         local = np.zeros((*scene.blocked.shape, 3), np.uint8)

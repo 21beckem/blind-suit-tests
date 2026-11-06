@@ -360,7 +360,7 @@ gl_FragColor=vec4(vec3(v),1.);}`;
             }
             if (f.discrete) {
                 const b = new Uint8Array(t.length);
-                for (let i = 0; i < t.length; i++) b[i] = t[i] >= 0.5 ? 255 : 0;
+                for (let i = 0; i < t.length; i++) b[i] = Math.round(t[i] * 255);
                 return { w: ow, h: oh, b, discrete: true };
             }
             const m = Math.max(ow, oh), n = c.res;

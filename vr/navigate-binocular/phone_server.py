@@ -3,8 +3,11 @@
 import socket
 import threading
 import ipaddress
+import json
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from config import V_ON, V_OFF
 
 
 VR_DIR = Path(__file__).resolve().parents[1]
@@ -16,9 +19,19 @@ class PhonePageHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(VR_DIR), **kwargs)
 
     def do_GET(self):
+        if self.path == "/hud-values.js":
+            payload = ("window.HUD_VALUES = Object.freeze(" +
+                       json.dumps({"on": V_ON, "off": V_OFF}) + ");\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.path in ("/", "/index.html"):
             self.send_response(302)
-            self.send_header("Location", "/binocular/")
+            self.send_header("Location", "/navigate-binocular/")
             self.end_headers()
             return
         super().do_GET()
