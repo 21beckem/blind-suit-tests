@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Binocular Depth VR</title>
+  <style>
+    body { font: 16px sans-serif; margin: 20px; }
+    button { font: inherit; margin: 4px 0; padding: 6px; }
+    #status { margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <button id="connect">Connect</button>
+  <button onclick="VR.enter();">Enter VR</button>
+  <div id="status">Disconnected</div>
+
+  <script src="../vr.js"></script>
+  <script>
+    VR.enableConfigPopup(true);
+    const connectButton = document.getElementById("connect");
+    const status = document.getElementById("status");
+    let socket;
+    let retryTimer;
+    let shouldConnect = false;
+
+    function setStatus(text) {
+      status.textContent = text;
+    }
+
+    function connect() {
+      if (!shouldConnect || (socket && socket.readyState <= WebSocket.OPEN)) return;
+      setStatus("Connecting...");
+      socket = new WebSocket("ws://127.0.0.1:5000");
+      socket.onopen = () => {
+        setStatus("Receiving depth");
+        connectButton.textContent = "Disconnect";
+      };
+      socket.onmessage = (event) => {
+        if (typeof event.data !== "string") return;
+        try {
+          VR.paint(JSON.parse(event.data));
+        } catch (error) {
+          console.error("Invalid depth grid:", error);
+        }
+      };
+      socket.onerror = () => socket.close();
+      socket.onclose = () => {
+        socket = undefined;
+        if (!shouldConnect) {
+          setStatus("Disconnected");
+          connectButton.textContent = "Connect";
+        } else {
+          setStatus("Retrying...");
+          retryTimer = setTimeout(connect, 1000);
+        }
+      };
+    }
+
+    function disconnect() {
+      shouldConnect = false;
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+      if (socket) socket.close();
+      socket = undefined;
+      setStatus("Disconnected");
+      connectButton.textContent = "Connect";
+    }
+
+    connectButton.addEventListener("click", () => {
+      if (shouldConnect) disconnect();
+      else {
+        shouldConnect = true;
+        connect();
+      }
+    });
+
+    shouldConnect = true;
+    connect();
+  </script>
+</body>
+</html>
