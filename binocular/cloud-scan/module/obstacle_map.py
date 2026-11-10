@@ -34,7 +34,10 @@ class ObstacleMap:
         self.floor_hits = np.zeros(shape, np.float32)
         self.danger_hits = np.zeros(shape, np.float32)
         self.last_seen = np.full(shape, -np.inf, np.float64)
+        self.last_danger_seen = np.full(shape, -np.inf, np.float64)
+        self.last_traversed = np.full(shape, -np.inf, np.float64)
         self._recent_obstacles = np.zeros((s["persistence_frames"], *shape), np.uint8)
+        self._recent_floor = np.zeros_like(self._recent_obstacles)
         self._history_index = 0
         self._last_update_s = None
         self._now_s = 0.0
@@ -68,7 +71,10 @@ class ObstacleMap:
             return
         for name, fill in (("max_height", -np.inf), ("min_height", np.inf),
                            ("hits", 0), ("floor_hits", 0), ("danger_hits", 0),
-                           ("last_seen", -np.inf), ("_recent_obstacles", 0)):
+                           ("last_seen", -np.inf), ("last_danger_seen", -np.inf),
+                           ("last_traversed", -np.inf),
+                           ("_recent_obstacles", 0),
+                           ("_recent_floor", 0)):
             setattr(self, name, self._shift(getattr(self, name), dx, dz, fill))
         self.origin_x_m += dx * self.cell_m
         self.origin_z_m += dz * self.cell_m
@@ -81,9 +87,86 @@ class ObstacleMap:
             factor = math.exp(-max(dt, 0) / self.settings["evidence_decay_s"])
             self.hits *= factor
             self.floor_hits *= factor
-            self.danger_hits *= factor
+            self.danger_hits *= math.exp(-max(dt, 0) / self.settings["danger_decay_s"])
         self._last_update_s = timestamp_s
         self._now_s = timestamp_s
+
+    def _carve_obstacle_rays(self, p_grav, floor_mask, cols, image_width,
+                             pose, camera_height_m, current_obstacles):
+        """Reduce old obstacle evidence only where solid floor rays cross its height.
+
+        A floor hit proves that its 3D camera-to-hit ray was clear. It does not
+        prove the ground beneath the ray was bare, so this never adds free
+        evidence. Height overlap prevents an overhead ray from erasing a low
+        box or tabletop that it could have passed above.
+        """
+        s = self.settings
+        candidate = np.flatnonzero(floor_mask)
+        if len(candidate) == 0:
+            return 0
+        bins = s["ray_bearing_bins"]
+        bearing_bin = np.minimum(cols[candidate] * bins // image_width, bins - 1)
+        chosen = []
+        for bearing in np.unique(bearing_bin):
+            members = candidate[bearing_bin == bearing]
+            chosen.append(members[np.argmax(p_grav[members, 2])])
+        endpoints = p_grav[chosen]
+        end_x, end_z = gravity_to_world_xz(endpoints, pose)
+        dx, dz = end_x - pose.x_m, end_z - pose.z_m
+        lengths = np.hypot(dx, dz)
+        step = np.arange(1, int(np.ceil(s["max_range_m"] / self.cell_m)) + 1,
+                         dtype=np.float32) * self.cell_m
+        fraction = step[None, :] / np.maximum(lengths[:, None], self.cell_m)
+        valid = fraction < 1 - s["ray_endpoint_margin_fraction"]
+        x = pose.x_m + fraction * dx[:, None]
+        z = pose.z_m + fraction * dz[:, None]
+        ix = np.floor((x - self.origin_x_m) / self.cell_m).astype(np.int32)
+        iz = np.floor((z - self.origin_z_m) / self.cell_m).astype(np.int32)
+        valid &= (ix >= 0) & (ix < self.side) & (iz >= 0) & (iz < self.side)
+        if not np.any(valid):
+            return 0
+        flat = iz[valid] * self.side + ix[valid]
+        ray_h = (1 - fraction) * camera_height_m + fraction * endpoints[:, 1, None]
+        ray_h = ray_h[valid]
+        height_margin = s["ray_height_margin_m"]
+        min_h = self.min_height.ravel()[flat]
+        max_h = self.max_height.ravel()[flat]
+        current_mask = np.zeros(self.side * self.side, bool)
+        current_mask[current_obstacles] = True
+        clear = ((self.hits.ravel()[flat] > 0) &
+                 (ray_h >= min_h - height_margin) &
+                 (ray_h <= max_h + height_margin) &
+                 ~current_mask[flat])
+        cells = np.unique(flat[clear])
+        if len(cells):
+            self.hits.ravel()[cells] = np.maximum(
+                0, self.hits.ravel()[cells] - s["ray_clear_obstacle_per_frame"])
+            cleared = cells[self.hits.ravel()[cells] == 0]
+            self.max_height.ravel()[cleared] = -np.inf
+            self.min_height.ravel()[cleared] = np.inf
+        return len(cells)
+
+    def _clear_traversed_to_unknown(self, pose, timestamp_s, current_obstacles):
+        """A traversed body footprint rules out an old obstacle, not unseen floor."""
+        radius = self.settings["traversal_clear_radius_m"]
+        center_x = int((pose.x_m - self.origin_x_m) / self.cell_m)
+        center_z = int((pose.z_m - self.origin_z_m) / self.cell_m)
+        cells = int(math.ceil(radius / self.cell_m))
+        x0, x1 = max(0, center_x - cells), min(self.side, center_x + cells + 1)
+        z0, z1 = max(0, center_z - cells), min(self.side, center_z + cells + 1)
+        iz, ix = np.mgrid[z0:z1, x0:x1]
+        x = self.origin_x_m + (ix + 0.5) * self.cell_m
+        z = self.origin_z_m + (iz + 0.5) * self.cell_m
+        mask = (x - pose.x_m) ** 2 + (z - pose.z_m) ** 2 <= radius ** 2
+        flat = (iz * self.side + ix)[mask]
+        if len(current_obstacles):
+            flat = np.setdiff1d(flat, current_obstacles, assume_unique=False)
+        self.hits.ravel()[flat] = 0
+        self.danger_hits.ravel()[flat] = 0
+        self.max_height.ravel()[flat] = -np.inf
+        self.min_height.ravel()[flat] = np.inf
+        self.last_traversed.ravel()[flat] = timestamp_s
+        return len(flat)
 
     def integrate(self, result, floor, pose, timestamp_s):
         """Integrate one observation, or only advance decay when pose/floor is unsafe."""
@@ -92,17 +175,22 @@ class ObstacleMap:
         self.tracking_ok = bool(pose is not None and pose.tracking_ok)
         if not floor.usable or not self.tracking_ok:
             return {"integrated": False, "obstacle_cells": 0, "floor_cells": 0,
-                    "danger_cells": 0, "far_hints": 0}
+                    "danger_cells": 0, "far_hints": 0, "carved_cells": 0,
+                    "traversed_cells": 0}
         self._recenter(pose)
         s = self.settings
-        p_cam, _, _ = sample_points(result, s["sample_stride"], s["min_range_m"],
-                                     s["far_hint_range_m"])
+        p_cam, _, cols = sample_points(result, s["sample_stride"], s["min_range_m"],
+                                       s["far_hint_range_m"])
         self._recent_obstacles[self._history_index] = 0
+        self._recent_floor[self._history_index] = 0
         self._history_index = (self._history_index + 1) % len(self._recent_obstacles)
         self.integrated_frames += 1
         if len(p_cam) == 0:
+            traversed = self._clear_traversed_to_unknown(
+                pose, timestamp_s, np.empty(0, np.int64))
             return {"integrated": True, "obstacle_cells": 0, "floor_cells": 0,
-                    "danger_cells": 0, "far_hints": 0}
+                    "danger_cells": 0, "far_hints": 0, "carved_cells": 0,
+                    "traversed_cells": traversed}
         p_grav = camera_to_gravity(p_cam, floor.rotation_grav_cam, floor.height_m)
         h = p_grav[:, 1]
         f_times_b = float(result.Q[2, 3] / result.Q[3, 2])
@@ -123,10 +211,16 @@ class ObstacleMap:
         inside = (ix >= 0) & (ix < self.side) & (iz >= 0) & (iz < self.side)
         flat = iz * self.side + ix
         obs_flat = np.unique(flat[inside & obstacle])
-        floor_flat = np.unique(flat[inside & floor_point])
+        # Several independent solid pixels in the same cell constitute a
+        # stronger floor observation than a single boundary/noise pixel.
+        floor_counts = np.bincount(flat[inside & floor_point],
+                                   minlength=self.side * self.side)
+        floor_flat = np.flatnonzero(floor_counts)
         danger_flat = np.unique(flat[inside & danger])
         floor_flat = np.setdiff1d(floor_flat, np.union1d(obs_flat, danger_flat),
                                   assume_unique=True)
+        if not floor.fresh:
+            floor_flat = floor_flat[:0]
         if len(obs_flat):
             raw = flat[inside & obstacle]
             height = h[inside & obstacle]
@@ -142,20 +236,39 @@ class ObstacleMap:
                 s["obstacle_evidence_cap"], old_hits)
             self.floor_hits.ravel()[obs_flat] *= 0.5
         if len(floor_flat):
-            self.floor_hits.ravel()[floor_flat] += s["floor_evidence_per_frame"]
+            dense = floor_counts[floor_flat] >= s["floor_dense_min_samples"]
+            self.floor_hits.ravel()[floor_flat] += np.where(
+                dense, s["floor_evidence_per_frame"],
+                s["floor_sparse_evidence_per_frame"])
             self.hits.ravel()[floor_flat] = np.maximum(
                 0, self.hits.ravel()[floor_flat] - s["free_clears_obstacle_per_frame"])
             self.danger_hits.ravel()[floor_flat] *= 0.5
+            slot = (self._history_index - 1) % len(self._recent_floor)
+            self._recent_floor[slot].ravel()[floor_flat[dense]] = 1
+            recent_floor = self._recent_floor.reshape(len(self._recent_floor), -1)[:, floor_flat].sum(axis=0)
+            recent_obstacles = self._recent_obstacles.reshape(len(self._recent_obstacles), -1)[:, floor_flat].sum(axis=0)
+            reconciled = (recent_floor >= s["floor_override_required"]) & (recent_obstacles == 0)
+            self.hits.ravel()[floor_flat[reconciled]] = 0
+            self.danger_hits.ravel()[floor_flat[reconciled]] = 0
+            self.max_height.ravel()[floor_flat[reconciled]] = -np.inf
+            self.min_height.ravel()[floor_flat[reconciled]] = np.inf
         if len(danger_flat):
             self.danger_hits.ravel()[danger_flat] += 1
             self.floor_hits.ravel()[danger_flat] = 0
+            self.last_danger_seen.ravel()[danger_flat] = timestamp_s
         np.minimum(self.floor_hits, s["floor_evidence_cap"], out=self.floor_hits)
         np.minimum(self.hits, s["obstacle_evidence_cap"], out=self.hits)
         for indices in (obs_flat, floor_flat, danger_flat):
             self.last_seen.ravel()[indices] = timestamp_s
+        carved_cells = (self._carve_obstacle_rays(
+            p_grav, floor_point, cols, result.disparity.shape[1], pose,
+            floor.height_m, obs_flat)
+                        if floor.fresh else 0)
+        traversed_cells = self._clear_traversed_to_unknown(pose, timestamp_s, obs_flat)
         return {"integrated": True, "obstacle_cells": len(obs_flat),
                 "floor_cells": len(floor_flat), "danger_cells": len(danger_flat),
-                "far_hints": far_hints}
+                "far_hints": far_hints, "carved_cells": carved_cells,
+                "traversed_cells": traversed_cells}
 
     def state_grid(self):
         """0 unknown, 1 free, 2 obstacle; 3 is an unknown drop-off warning."""
@@ -163,8 +276,13 @@ class ObstacleMap:
         recent = self._recent_obstacles.sum(axis=0)
         age_ok = self._now_s - self.last_seen <= s["evidence_ttl_s"]
         states = np.zeros(self.hits.shape, np.uint8)
-        danger = age_ok & (self.danger_hits >= s["danger_evidence_required"])
-        obstacle = age_ok & (self.hits >= s["obstacle_evidence_required"])
+        danger = ((self._now_s - self.last_danger_seen <= s["danger_ttl_s"]) &
+                  (self.danger_hits >= s["danger_evidence_required"]))
+        height_supported = ((self.max_height >= s["obstacle_high_surface_m"]) |
+                            (self.max_height - self.min_height >=
+                             s["obstacle_min_vertical_span_m"]))
+        obstacle = (age_ok & (self.hits >= s["obstacle_evidence_required"]) &
+                    height_supported)
         free = (age_ok & (self.floor_hits >= s["floor_evidence_required"]) &
                 (self.hits < 0.5) & (recent == 0) & ~danger)
         states[free] = self.FREE
@@ -217,3 +335,31 @@ class ObstacleMap:
     def blind_zone(self):
         return {"near_m": self.settings["min_range_m"],
                 "below_frame_unknown": True, "tracking_ok": self.tracking_ok}
+
+    def forward_coverage(self, length_m, width_m):
+        """Count observed and unknown cells in a camera-relative corridor."""
+        if self.pose is None:
+            return None
+        iz, ix = np.indices(self.hits.shape)
+        dx = self.origin_x_m + (ix + 0.5) * self.cell_m - self.pose.x_m
+        dz = self.origin_z_m + (iz + 0.5) * self.cell_m - self.pose.z_m
+        c, s = math.cos(self.pose.yaw_rad), math.sin(self.pose.yaw_rad)
+        forward = s * dx + c * dz
+        lateral = c * dx - s * dz
+        region = (forward >= 0) & (forward < length_m) & (
+            np.abs(lateral) < width_m / 2)
+        states = self.state_grid()
+        measured_floor = region & (self.floor_hits > 0)
+        recent_obstacle = self._recent_obstacles.sum(axis=0) > 0
+        return {"cells": int(np.count_nonzero(region)),
+                "floor_evidence_cells": int(np.count_nonzero(measured_floor)),
+                "floor_with_obstacle_evidence": int(np.count_nonzero(
+                    measured_floor & (self.hits >= 0.5))),
+                "floor_with_recent_obstacle": int(np.count_nonzero(
+                    measured_floor & recent_obstacle)),
+                "floor_with_danger": int(np.count_nonzero(
+                    measured_floor & (states == self.DANGER))),
+                "free": int(np.count_nonzero(region & (states == self.FREE))),
+                "obstacle": int(np.count_nonzero(region & (states == self.OBSTACLE))),
+                "danger_unknown": int(np.count_nonzero(region & (states == self.DANGER))),
+                "unknown": int(np.count_nonzero(region & (states == self.UNKNOWN)))}

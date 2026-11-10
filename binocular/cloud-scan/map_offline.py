@@ -169,10 +169,15 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
                        "integrated": integration["integrated"],
                        "observed_obstacle_cells": integration["obstacle_cells"],
                        "observed_floor_cells": integration["floor_cells"],
+                       "carved_obstacle_cells": integration["carved_cells"],
+                       "traversed_cells": integration["traversed_cells"],
                        "far_hints": integration["far_hints"],
                        "map_obstacles": int(np.count_nonzero(states == grid.OBSTACLE)),
                        "map_free": int(np.count_nonzero(states == grid.FREE)),
                        "map_danger_unknown": int(np.count_nonzero(states == grid.DANGER)),
+                       "near_forward": grid.forward_coverage(
+                           config["map"]["near_corridor_diagnostic_length_m"],
+                           config["map"]["near_corridor_diagnostic_width_m"]),
                        "depth_ms": depth_ms, "mapping_ms": mapping_ms}
                 frames.append(row)
                 if timestamp_s >= next_debug_s:
@@ -247,13 +252,15 @@ def main():
     parser.add_argument("--recording", type=Path, action="append",
                         help="process these recordings instead of auto-discovering")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--debug-interval-s", type=float,
+                        help="seconds between saved debug images (default: map config)")
     args = parser.parse_args()
     config = load_config()
     recordings = args.recording or discover_recordings()
     output_root = args.output_dir or Path(config["map"]["output_dir"])
     reports = []
     for recording in recordings:
-        report = run_recording(recording, config, output_root)
+        report = run_recording(recording, config, output_root, args.debug_interval_s)
         reports.append({key: report.get(key) for key in
                         ("recording", "status", "reason", "frames_decoded", "duration_s",
                          "floor_fresh_frames", "tracking_ok_frames", "tracking_resets",

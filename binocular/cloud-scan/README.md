@@ -105,8 +105,11 @@ processes each independently, and writes `stereo_out/map_runs/summary.json` plus
 unreadable, low-depth, or untrackable recordings receive an explicit `unsuitable` result.
 The supplied apartment recording contains 1,135 frames at 25 fps over 45.4 seconds.
 Use `--recording path/to/video.avi` to process one file and `--output-dir path` to
-choose a diagnostics directory. The live command uses a one-slot capture thread so
-processing always takes the newest available frame; Esc or Q closes its map window.
+choose a diagnostics directory; `--debug-interval-s 1` saves images every second.
+`map_live.py` replays that recording sequentially at its source frame rate by default.
+Pass `--camera` to use the physical stereo camera. Both paths use a one-slot capture
+thread, and repeated source frames are not integrated twice. Esc or Q closes the map
+window.
 
 `config.json` has a `map` section for geometry, floor, evidence, tracking, suitability,
 and output thresholds. The grid is 6 m by 6 m at 5 cm per cell. The three navigation
@@ -114,6 +117,24 @@ states are **unknown**, **free**, and **obstacle**; a below-floor warning is ren
 separately but queried as unknown. Only confidence-2 stereo points inside the trusted
 3 m range affect geometry. Floor evidence is required for free space; weak/missing
 depth, unobserved space, the near blind zone, and tracking loss do not become free.
+Several solid floor pixels can establish a free cell in one frame. Repeated solid
+floor observations reconcile older conflicting obstacle evidence. A solid floor ray
+can reduce an old obstacle only where the ray crosses its measured height; it never
+marks unseen ground free. Cells traversed by the wearer are cleared to unknown if
+they conflict with older obstacle evidence. They are not labeled free unless floor
+was actually observed there. The viewer hatches recently traversed unknown cells
+in teal so the walked route remains distinct from measured free floor. Below-floor
+warnings fade to unknown after they stop being observed.
+Obstacle evidence now fades on a 5 s time scale: a confirmed but unobserved
+obstacle remains for roughly four seconds, then becomes unknown. This reduces
+old obstacle paint during a turn while retaining short-term memory.
+
+The camera cannot see the floor immediately around its own position. A connected
+green corridor through that blind strip cannot be inferred honestly from this
+recording. The top-down viewer therefore leaves it unknown even when the person
+has walked through it; the map's `blind_zone()` query exposes this limitation.
+Offline `metrics.json` records `near_forward` counts for the first 1 m by 1 m
+ahead of the camera on every frame, including measured-floor and unknown cells.
 
 `module.ground_plane.GroundPlaneEstimator.fit(result, timestamp_s)` returns the floor
 normal, camera height, gravity transform, and fresh/usable flags.

@@ -189,6 +189,99 @@ class SingleFrameMapTests(unittest.TestCase):
 
 
 class TemporalMapTests(unittest.TestCase):
+    def test_obstacle_survives_recent_turn_then_fades_without_new_hits(self):
+        grid = ObstacleMap(load_config())
+        grid.hits[60, 60] = grid.settings["obstacle_evidence_cap"]
+        grid.min_height[60, 60] = 0.2
+        grid.max_height[60, 60] = 0.8
+        grid.last_seen[60, 60] = 0
+        grid._decay(0)
+        grid._decay(3)
+        self.assertEqual(grid.state_grid()[60, 60], grid.OBSTACLE)
+        grid._decay(6)
+        self.assertEqual(grid.state_grid()[60, 60], grid.UNKNOWN)
+
+    def test_forward_coverage_counts_unknown_without_inferred_free(self):
+        grid = ObstacleMap(load_config())
+        grid.pose = Pose2D()
+        coverage = grid.forward_coverage(1.0, 1.0)
+        self.assertGreater(coverage["cells"], 0)
+        self.assertEqual(coverage["floor_evidence_cells"], 0)
+        self.assertEqual(coverage["unknown"], coverage["cells"])
+
+    def test_traversed_footprint_clears_to_unknown_without_inventing_floor(self):
+        config = load_config()
+        grid = ObstacleMap(config)
+        row, col = 60, 60
+        grid.hits[row, col] = 6
+        grid.danger_hits[row, col] = 5
+        grid.last_seen[row, col] = 0
+        grid.last_danger_seen[row, col] = 0
+        grid.min_height[row, col] = 0.1
+        grid.max_height[row, col] = 0.7
+        result, _, _ = synthetic_scene()
+        result.confidence[:] = 0
+        normal = np.array([0., -1., 0.])
+        floor = FloorEstimate(normal, 1.1, gravity_rotation(normal),
+                              False, True, 0, 0, 0)
+        grid.integrate(result, floor, Pose2D(), 0)
+        self.assertEqual(grid.state_grid()[row, col], grid.UNKNOWN)
+        self.assertEqual(grid.floor_hits[row, col], 0)
+
+    def test_low_flat_depth_artifact_stays_unknown(self):
+        grid = ObstacleMap(load_config())
+        row, col = 60, 60
+        grid.hits[row, col] = 6
+        grid.last_seen[row, col] = 0
+        grid.min_height[row, col] = 0.10
+        grid.max_height[row, col] = 0.16
+        self.assertEqual(grid.state_grid()[row, col], grid.UNKNOWN)
+        grid.max_height[row, col] = 0.40
+        self.assertEqual(grid.state_grid()[row, col], grid.OBSTACLE)
+        grid.min_height[row, col] = grid.max_height[row, col] = 0.70
+        self.assertEqual(grid.state_grid()[row, col], grid.OBSTACLE)
+
+    def test_unobserved_dropoff_warning_fades_to_unknown(self):
+        grid = ObstacleMap(load_config())
+        grid.danger_hits[60, 60] = 5
+        grid.last_danger_seen[60, 60] = 0
+        grid._now_s = 0
+        self.assertEqual(grid.state_grid()[60, 60], grid.DANGER)
+        grid._decay(3.0)
+        self.assertEqual(grid.state_grid()[60, 60], grid.UNKNOWN)
+
+    def test_floor_ray_clears_crossed_wall_but_not_low_box(self):
+        grid = ObstacleMap(load_config())
+        grid.hits[:] = 6
+        grid.min_height[:] = 0.1
+        grid.max_height[:] = 0.3
+        low_x, low_z = int((0.125 + 3) / 0.05), int((1.0 + 3) / 0.05)
+        tall_x, tall_z = int((0.1875 + 3) / 0.05), int((1.5 + 3) / 0.05)
+        grid.max_height[tall_z - 1:tall_z + 2, tall_x - 1:tall_x + 2] = 1.2
+        carved = grid._carve_obstacle_rays(
+            np.array([[0.25, 0., 2.]], np.float32),
+            np.array([True]), np.array([160]), 320, Pose2D(), 1.1,
+            np.empty(0, np.int64))
+        self.assertGreater(carved, 0)
+        self.assertEqual(grid.hits[low_z, low_x], 6)
+        self.assertLess(np.min(grid.hits[tall_z - 1:tall_z + 2,
+                                          tall_x - 1:tall_x + 2]), 6)
+
+    def test_repeated_solid_floor_replaces_obsolete_obstacle(self):
+        config = load_config()
+        box, _, _ = synthetic_scene(1.5)
+        bare, _, _ = synthetic_scene()
+        estimator = GroundPlaneEstimator(config)
+        grid = ObstacleMap(config)
+        for frame in range(3):
+            t = frame / 25
+            grid.integrate(box, estimator.fit(box, t), Pose2D(), t)
+        self.assertEqual(grid.cell_state(0.25, 1.5), "obstacle")
+        for frame in range(3, 10):
+            t = frame / 25
+            grid.integrate(bare, estimator.fit(bare, t), Pose2D(), t)
+        self.assertEqual(grid.cell_state(0.25, 1.5), "free")
+
     def test_dropoff_is_unknown_danger_not_free(self):
         config = load_config()
         result, _, _ = synthetic_scene(dropoff_m=0.35)
@@ -372,6 +465,78 @@ class OfflineRunnerTests(unittest.TestCase):
 
 
 class LatestFrameTests(unittest.TestCase):
+    def test_sequential_recording_is_paced_by_source_time(self):
+        class SequentialFeed:
+            def __init__(self, config):
+                self._capture = type("Capture", (), {"set": lambda *_: True})()
+                self._frame_index = 0
+                self._fps = 25.0
+
+            def __enter__(self):
+                return self
+
+            def read(self):
+                if self._frame_index == 3:
+                    raise RuntimeError("end")
+                value = self._frame_index
+                self._frame_index += 1
+                return value, value
+
+            def close(self):
+                pass
+
+        with LatestCameraFeed(SequentialFeed, {}) as feed:
+            values = [feed.read() for _ in range(3)]
+        self.assertEqual([pair[0] for pair in values], [0, 1, 2])
+        np.testing.assert_allclose([pair[2] for pair in values], [0, .04, .08])
+
+    def test_realtime_recording_publishes_each_source_frame_once(self):
+        ready = Event()
+        closed = Event()
+
+        class FakeCapture:
+            position = 0
+
+            def set(self, *_):
+                return True
+
+            def get(self, *_):
+                return self.position
+
+        class RepeatingRecording:
+            def __init__(self, config):
+                self._capture = FakeCapture()
+                self._start_time = 0.0
+                self._fps = 25.0
+                self.sequence = [0, 0, 0, 1, 1, 2]
+                self.index = 0
+
+            def __enter__(self):
+                return self
+
+            def read(self):
+                if self.index == len(self.sequence):
+                    ready.set()
+                    closed.wait(1)
+                    raise RuntimeError("closed")
+                value = self.sequence[self.index]
+                self.index += 1
+                self._capture.position = value + 1
+                return value, value
+
+            def close(self):
+                closed.set()
+
+        with LatestCameraFeed(RepeatingRecording, {}) as feed:
+            self.assertTrue(ready.wait(1))
+            with feed._condition:
+                while feed._serial < 3:
+                    feed._condition.wait(1)
+            self.assertEqual(feed._serial, 3)
+            left, right, timestamp_s = feed.read()
+            self.assertEqual((left, right), (2, 2))
+            self.assertAlmostEqual(timestamp_s, 2 / 25)
+
     def test_capture_thread_keeps_only_latest_pair(self):
         ready = Event()
         closed = Event()
@@ -397,18 +562,32 @@ class LatestFrameTests(unittest.TestCase):
             def close(self):
                 closed.set()
 
-        with patch("module.latest_camera_feed.CameraFeed", FakeFeed):
-            with LatestCameraFeed({}) as feed:
-                self.assertTrue(ready.wait(1))
-                with feed._condition:
-                    while feed._serial < 5:
-                        feed._condition.wait(1)
-                left, right, timestamp_s = feed.read()
-                self.assertEqual((left, right), (4, 4))
-                self.assertGreater(timestamp_s, 0)
+        with LatestCameraFeed(FakeFeed, {}) as feed:
+            self.assertTrue(ready.wait(1))
+            with feed._condition:
+                while feed._serial < 5:
+                    feed._condition.wait(1)
+            left, right, timestamp_s = feed.read()
+            self.assertEqual((left, right), (4, 4))
+            self.assertGreater(timestamp_s, 0)
 
 
 class LiveEntryTests(unittest.TestCase):
+    def test_recording_end_exits_live_view_cleanly(self):
+        config = load_config()
+        config["benchmark"]["output"] = None
+        with patch("map_live.load_config", return_value=config), \
+                patch("map_live.DepthMapper") as mapper, \
+                patch("map_live.LatestCameraFeed") as camera, \
+                patch("map_live.MapWindow") as window_class:
+            window_class.return_value.__enter__.return_value.is_open = True
+            camera.return_value.__enter__.return_value.read.side_effect = RuntimeError(
+                "End of stereo recording")
+            with redirect_stdout(io.StringIO()):
+                map_live.main()
+            mapper.return_value.compute.assert_not_called()
+            window_class.return_value.__exit__.assert_called_once()
+
     def test_one_live_frame_runs_depth_floor_tracker_and_map(self):
         config = load_config()
         config["benchmark"]["output"] = None

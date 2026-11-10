@@ -6,13 +6,14 @@ from module.config import load_config
 from module.depth_mapper import DepthMapper
 from module.ground_plane import GroundPlaneEstimator
 from module.latest_camera_feed import LatestCameraFeed
-from module.recorded_camera_feed import CameraFeed
+from module.recorded_camera_feed_sequential import CameraFeed
+from module.camera_feed import CameraFeed as PhysicalCameraFeed
 from module.map_view import MapWindow
 from module.obstacle_map import ObstacleMap
 from module.pose_tracker import PoseTracker
 
 
-def main():
+def main(camera_feed_class=CameraFeed):
     config = load_config()
     depth = DepthMapper(config)
     ground = GroundPlaneEstimator(config)
@@ -20,10 +21,15 @@ def main():
     grid = ObstacleMap(config)
     bench = Benchmark().setup("capture", "depth", "mapping", "display")
     try:
-        with LatestCameraFeed(CameraFeed, config["camera"]) as feed, MapWindow() as window:
+        with LatestCameraFeed(camera_feed_class, config["camera"]) as feed, MapWindow() as window:
             while window.is_open:
-                with bench.measure("capture"):
-                    left, right, timestamp_s = feed.read()
+                try:
+                    with bench.measure("capture"):
+                        left, right, timestamp_s = feed.read()
+                except RuntimeError as error:
+                    if str(error) == "End of stereo recording":
+                        break
+                    raise
                 with bench.measure("depth"):
                     result = depth.compute(left, right)
                 with bench.measure("mapping"):
@@ -41,4 +47,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--camera", action="store_true",
+                        help="use the physical stereo camera instead of paced recording replay")
+    args = parser.parse_args()
+    main(PhysicalCameraFeed if args.camera else CameraFeed)
