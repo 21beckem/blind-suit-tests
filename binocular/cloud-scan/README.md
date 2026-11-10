@@ -59,7 +59,8 @@ file from your own code. The default JSON stays in `cloud-scan/`, above `module/
 | `module/point_cloud.py` | `PointCloud.from_depth(result)`, `downsample(voxel_size)`, `export(path)` |
 | `module/benchmark.py` | `Benchmark`, `setup(*names)`, `start(name)`, `stop(name)`, `measure(name)`, `display()`, `save(path)` |
 
-Only `live_depth.py` and `image_depth.py` remain as scripts at the top level. Shared
+The depth preview scripts are `live_depth.py` and `image_depth.py`; the obstacle-map
+scripts are `map_live.py` and `map_offline.py`. Shared
 Python code lives in the `module/` package; import it with `from module.<name> import ...`.
 
 `CameraFeed` and `DepthWindow` are context managers: use `with` to release the camera and
@@ -68,8 +69,8 @@ reused for every pair. Matching and confidence filtering preserve the original a
 the uncommon tuning switches, diagnostics, and alternate cloud renders have been removed.
 
 To capture a stereo recording, run `python -m module.recorded_camera_feed`
-from the `binocular/cloud-scan` directory. The default file stays at
-`cloud-scan/recorded_camera_feed.avi`. The live preview shows the whole stereo frame;
+from the `binocular/cloud-scan` directory. The existing default clip is at
+`cloud-scan/module/recorded_camera_feed.avi`. The live preview shows the whole stereo frame;
 press Esc in that window to stop and save the recording. The window's existing Q and
 close-button controls also stop it. Use `--output path/to/capture.avi` to change the
 destination. To replay it in
@@ -83,6 +84,51 @@ current elapsed time. Slow processing skips older frames, while repeated reads w
 one frame interval return that frame again. Reading beyond the end of the recording
 raises `RuntimeError`. The full frame is saved before rotation or splitting, so
 `camera.rotate_180` behaves the same during replay.
+
+For deterministic offline processing, use `module.recorded_camera_feed_sequential.CameraFeed`.
+It has the same constructor, `read()`, context manager, `close()`, and `split_frame()`
+interface, but each `read()` decodes the next frame regardless of processing speed.
+`map_offline.py` uses the recording's source timestamps and reports any timestamp fallback.
+
+## Rolling obstacle map
+
+From this directory, run:
+
+```powershell
+..\..\.venv\Scripts\python.exe map_offline.py
+..\..\.venv\Scripts\python.exe map_live.py
+```
+
+The offline command discovers compatible AVI/MP4/MOV/MKV files under `cloud-scan/`,
+processes each independently, and writes `stereo_out/map_runs/summary.json` plus a
+`metrics.json`, periodic top-down maps, and depth images for each recording. Wrong-size,
+unreadable, low-depth, or untrackable recordings receive an explicit `unsuitable` result.
+The supplied apartment recording contains 1,135 frames at 25 fps over 45.4 seconds.
+Use `--recording path/to/video.avi` to process one file and `--output-dir path` to
+choose a diagnostics directory. The live command uses a one-slot capture thread so
+processing always takes the newest available frame; Esc or Q closes its map window.
+
+`config.json` has a `map` section for geometry, floor, evidence, tracking, suitability,
+and output thresholds. The grid is 6 m by 6 m at 5 cm per cell. The three navigation
+states are **unknown**, **free**, and **obstacle**; a below-floor warning is rendered
+separately but queried as unknown. Only confidence-2 stereo points inside the trusted
+3 m range affect geometry. Floor evidence is required for free space; weak/missing
+depth, unobserved space, the near blind zone, and tracking loss do not become free.
+
+`module.ground_plane.GroundPlaneEstimator.fit(result, timestamp_s)` returns the floor
+normal, camera height, gravity transform, and fresh/usable flags.
+`module.pose_tracker.PoseTracker.update(result, floor, timestamp_s)` returns world
+X/Z/yaw and a tracking flag. `module.obstacle_map.ObstacleMap` integrates the frame and
+offers `cell_state(x_m, z_m)`, `nearest_obstacle(direction_deg, width_deg)`,
+`clearance_sectors()`, `blind_zone()`, and `tracking_ok`. Directions are relative to
+camera forward; positive degrees point right. A `None` obstacle distance means there
+is no **known** obstacle in that query, not that the corridor is known free.
+
+Camera points use OpenCV X right, Y down, Z forward. Gravity and world points use X
+right, Y up, Z forward, with the floor at Y=0. The map tracks a few local metres and
+decays stale evidence; it does not claim a global scan or labeled obstacle accuracy.
+Tracking loss stops integration, and a long loss starts a fresh local map rather than
+joining poses across an unobserved interval.
 
 `DepthResult` contains `disparity` (float32 pixels, 0 invalid), `confidence` (0 invalid,
 1 weak, 2 solid), `gray` (rectified left grayscale), `Q` (working-resolution reprojection

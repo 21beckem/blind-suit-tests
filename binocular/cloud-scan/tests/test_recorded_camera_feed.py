@@ -12,6 +12,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from module.recorded_camera_feed import DEFAULT_RECORDING, CameraFeed, record_video
+from module.recorded_camera_feed_sequential import CameraFeed as SequentialCameraFeed
 
 
 class RecordedCameraFeedTests(unittest.TestCase):
@@ -95,7 +96,27 @@ class RecordedCameraFeedTests(unittest.TestCase):
             capture.return_value.release.assert_called_once()
 
     def test_default_recording_stays_in_cloud_scan(self):
-        self.assertEqual(DEFAULT_RECORDING, Path(__file__).resolve().parents[1] / "recorded_camera_feed.avi")
+        self.assertEqual(DEFAULT_RECORDING, Path(__file__).resolve().parents[1] / "module/recorded_camera_feed.avi")
+        self.assertTrue(DEFAULT_RECORDING.is_file())
+
+    def test_sequential_feed_never_skips_or_repeats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "sequential.avi"
+            writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"MJPG"),
+                                     25, (128, 48))
+            self.assertTrue(writer.isOpened())
+            try:
+                for index in range(5):
+                    writer.write(np.full((48, 128, 3), index * 40, dtype=np.uint8))
+            finally:
+                writer.release()
+
+            config = {"recording": str(output), "rotate_180": False}
+            with SequentialCameraFeed(config) as feed:
+                means = [float(feed.read()[0].mean()) for _ in range(5)]
+                with self.assertRaisesRegex(RuntimeError, "End of stereo recording"):
+                    feed.read()
+            np.testing.assert_allclose(means, [0, 40, 80, 120, 160], atol=3)
 
 
 if __name__ == "__main__":

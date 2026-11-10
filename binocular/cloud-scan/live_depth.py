@@ -17,10 +17,13 @@ def main():
         with CameraFeed(config["camera"]) as feed, DepthWindow(config["window"]["name"]) as window:
             while window.is_open:
                 try:
-                    left, right = feed.read()
-                except Exception as e:
-                    print(f"Camera feed ended: {e}")
-                    break
+                    with bench.measure("capture"):
+                        left, right = feed.read()
+                except RuntimeError as error:
+                    if str(error) == "Could not read a frame from the stereo camera":
+                        print(f"Camera feed ended: {error}")
+                        break
+                    raise
                 with bench.measure("depth"):
                     result = depth.compute(left, right)
                 with bench.measure("display"):

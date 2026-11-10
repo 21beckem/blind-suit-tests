@@ -16,4 +16,6 @@ def load_config(path=None):
         config["camera"]["recording"] = str((path.parent / config["camera"]["recording"]).resolve())
     if config.get("benchmark", {}).get("output") is not None:
         config["benchmark"]["output"] = str((path.parent / config["benchmark"]["output"]).resolve())
+    if config.get("map", {}).get("output_dir") is not None:
+        config["map"]["output_dir"] = str((path.parent / config["map"]["output_dir"]).resolve())
     return config
