@@ -36,6 +36,7 @@ echo "Activating virtual environment..."
 #   source ./setup-venv.sh
 source .venv/bin/activate
 
+echo Installing missing packages...
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
