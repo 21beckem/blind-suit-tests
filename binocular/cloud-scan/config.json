@@ -4,7 +4,7 @@
     "index": 1,
     "width": 1280,
     "height": 480,
-    "rotate_180": false
+    "rotate_180": true
   },
   "images": {
     "left": "img/raw_left.png",
@@ -13,8 +13,8 @@
   "depth": {
     "rectify": true,
     "num_disp": 80,
-    "block": 5,
-    "scale": 1.0,
+    "block": 3,
+    "scale": 0.5,
     "max_rel_err": 0.1,
     "tex_min": 3.0
   },
