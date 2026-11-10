@@ -18,9 +18,7 @@ def render_map(grid, pixels_per_cell=3, fov_deg=46.0):
     # A walked footprint is useful context, but it is still UNKNOWN unless
     # solid floor was measured. Hatch it in a distinct color rather than
     # turning it into a navigation-free cell.
-    traversed_unknown = ((states == ObstacleMap.UNKNOWN) &
-                         (grid._now_s - grid.last_traversed <=
-                          grid.settings["traversal_display_ttl_s"]))
+    traversed_unknown = (states == ObstacleMap.UNKNOWN) & grid.walked_path_mask()
     rows, cols = np.indices(states.shape)
     hatch = traversed_unknown & ((rows + cols) % 3 != 0)
     image[np.flipud(hatch)] = (115, 100, 35)

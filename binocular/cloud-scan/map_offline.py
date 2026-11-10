@@ -2,6 +2,7 @@
 """Run every discovered stereo recording deterministically and save diagnostics."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -77,6 +78,39 @@ def _save_json(path, data):
     with path.open("w", encoding="utf-8") as file:
         json.dump(data, file, indent=2, allow_nan=False)
         file.write("\n")
+
+
+def _fixture_checkpoint(path, config, metadata, frames):
+    """Guard the annotated apartment moment without constraining new clips."""
+    fixture = config["map"].get("acceptance_fixture")
+    if not fixture or path.name != fixture["recording_name"]:
+        return {"matched": False}
+    digest = hashlib.sha256()
+    with path.open("rb") as recording:
+        for chunk in iter(lambda: recording.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != fixture["sha256"]:
+        return {"matched": False, "reason": "recording hash differs from fixture"}
+    checkpoint = (min(frames, key=lambda row: abs(
+        row["timestamp_s"] - fixture["checkpoint_s"])) if frames else None)
+    timed = (checkpoint is not None and
+             abs(checkpoint["timestamp_s"] - fixture["checkpoint_s"]) <=
+             0.5 / metadata["fps"] + 1e-6)
+    checks = {"fixture_checkpoint_present": bool(timed)}
+    if timed:
+        checks.update({
+            "fixture_free_floor_coverage": checkpoint["map_free"] >=
+                                           fixture["min_free_cells"],
+            "fixture_obstacle_paint": checkpoint["map_obstacles"] <=
+                                      fixture["max_obstacle_cells"],
+            "fixture_dropoff_paint": checkpoint["map_danger_unknown"] <=
+                                     fixture["max_danger_unknown_cells"],
+        })
+    return {"matched": True, "timestamp_s": fixture["checkpoint_s"],
+            "frame": checkpoint["frame"] if timed else None,
+            "counts": ({key: checkpoint[key] for key in
+                        ("map_free", "map_obstacles", "map_danger_unknown")}
+                       if timed else None), "checks": checks}
 
 
 def run_recording(path, config, output_root=None, debug_interval_s=None):
@@ -204,6 +238,19 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
         "tracking_continuity": bool(frame_count and sum(r["tracking_ok"] for r in frames) / frame_count >=
                                     config["map"]["accept_min_tracking_fraction"]),
     }
+    fixture_checkpoint = _fixture_checkpoint(path, config, metadata, frames)
+    checks = {
+        "decoded_all_advertised_frames": (metadata["advertised_frames"] <= 0 or
+                                          len(frames) == metadata["advertised_frames"]),
+        "no_integration_while_tracking_lost": safety_ok,
+        "mapping_p95_under_30_ms": bool(mapping_times and
+                                        np.percentile(mapping_times, 95) < 30.0),
+        "near_free_requires_floor_evidence": all(
+            row["near_forward"]["free"] <=
+            row["near_forward"]["floor_evidence_cells"] for row in frames),
+    }
+    if fixture_checkpoint["matched"]:
+        checks.update(fixture_checkpoint["checks"])
     metrics.update({
         "frames_decoded": len(frames), "duration_s": last_t,
         "source_timestamp_fallbacks": source_fallbacks,
@@ -221,13 +268,8 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
                         "free": int(np.count_nonzero(states == grid.FREE)),
                         "obstacle": int(np.count_nonzero(states == grid.OBSTACLE)),
                         "danger_unknown": int(np.count_nonzero(states == grid.DANGER))},
-        "checks": {
-            "decoded_all_advertised_frames": (metadata["advertised_frames"] <= 0 or
-                                              len(frames) == metadata["advertised_frames"]),
-            "no_integration_while_tracking_lost": safety_ok,
-            "mapping_p95_under_30_ms": bool(mapping_times and
-                                            np.percentile(mapping_times, 95) < 30.0),
-        },
+        "checks": checks,
+        "fixture_checkpoint": fixture_checkpoint,
         "suitability": suitability,
         "limitations": ["The apartment clip has no labeled obstacle positions.",
                         "No free space is inferred through weak, missing, or distant depth.",

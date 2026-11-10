@@ -46,8 +46,12 @@
     "obstacle_sigma_multiplier": 2.0,
     "obstacle_high_surface_m": 0.30,
     "obstacle_min_vertical_span_m": 0.10,
+    "artifact_max_component_samples": 12,
+    "artifact_max_component_rows": 3,
+    "artifact_max_height_m": 0.50,
     "hole_min_below_m": 0.20,
     "danger_sigma_multiplier": 2.0,
+    "danger_min_component_samples": 20,
     "danger_evidence_required": 2.5,
     "danger_decay_s": 3.0,
     "danger_ttl_s": 2.5,
@@ -72,6 +76,8 @@
     "free_clears_obstacle_per_frame": 0.08,
     "evidence_decay_s": 5.0,
     "evidence_ttl_s": 10.0,
+    "floor_evidence_decay_s": 10.0,
+    "floor_evidence_ttl_s": 12.0,
     "tracking_bucket_rows": 4,
     "tracking_bucket_cols": 4,
     "tracking_max_corners_per_bucket": 30,
@@ -100,6 +106,14 @@
     "accept_min_solid_fraction": 0.05,
     "accept_min_floor_usable_fraction": 0.2,
     "accept_min_tracking_fraction": 0.25,
+    "acceptance_fixture": {
+      "recording_name": "recorded_camera_feed.avi",
+      "sha256": "ad499374d0f63fa30acc31c53eb33b9cd7c663f9d7e3e028c3dca2659dbef5dd",
+      "checkpoint_s": 38.0,
+      "min_free_cells": 780,
+      "max_obstacle_cells": 1700,
+      "max_danger_unknown_cells": 300
+    },
     "output_dir": "stereo_out/map_runs"
   },
   "benchmark": {

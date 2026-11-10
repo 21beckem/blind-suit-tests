@@ -2,6 +2,7 @@
 
 import math
 
+import cv2
 import numpy as np
 
 from .map_geometry import camera_to_gravity, gravity_to_world_xz, sample_points
@@ -34,6 +35,7 @@ class ObstacleMap:
         self.floor_hits = np.zeros(shape, np.float32)
         self.danger_hits = np.zeros(shape, np.float32)
         self.last_seen = np.full(shape, -np.inf, np.float64)
+        self.last_floor_seen = np.full(shape, -np.inf, np.float64)
         self.last_danger_seen = np.full(shape, -np.inf, np.float64)
         self.last_traversed = np.full(shape, -np.inf, np.float64)
         self._recent_obstacles = np.zeros((s["persistence_frames"], *shape), np.uint8)
@@ -71,7 +73,8 @@ class ObstacleMap:
             return
         for name, fill in (("max_height", -np.inf), ("min_height", np.inf),
                            ("hits", 0), ("floor_hits", 0), ("danger_hits", 0),
-                           ("last_seen", -np.inf), ("last_danger_seen", -np.inf),
+                           ("last_seen", -np.inf), ("last_floor_seen", -np.inf),
+                           ("last_danger_seen", -np.inf),
                            ("last_traversed", -np.inf),
                            ("_recent_obstacles", 0),
                            ("_recent_floor", 0)):
@@ -86,7 +89,8 @@ class ObstacleMap:
                 raise ValueError("map timestamps must be monotonic")
             factor = math.exp(-max(dt, 0) / self.settings["evidence_decay_s"])
             self.hits *= factor
-            self.floor_hits *= factor
+            self.floor_hits *= math.exp(
+                -max(dt, 0) / self.settings["floor_evidence_decay_s"])
             self.danger_hits *= math.exp(-max(dt, 0) / self.settings["danger_decay_s"])
         self._last_update_s = timestamp_s
         self._now_s = timestamp_s
@@ -168,6 +172,54 @@ class ObstacleMap:
         self.last_traversed.ravel()[flat] = timestamp_s
         return len(flat)
 
+    def _suppress_flat_obstacle_fragments(self, obstacle, heights_m, rows, cols,
+                                          image_shape):
+        """Reject tiny horizontal stereo aliases on patterned floors to unknown.
+
+        Apply this to image-space components before temporal fusion. The sampled
+        pixels remain neither floor nor free; only obstacle evidence is removed.
+        A tall thin component or a high horizontal tabletop remains eligible.
+        """
+        if not np.any(obstacle):
+            return obstacle
+        s = self.settings
+        stride = s["sample_stride"]
+        shape = tuple((dimension + stride - 1) // stride for dimension in image_shape)
+        sampled = np.zeros(shape, np.uint8)
+        sampled[rows[obstacle] // stride, cols[obstacle] // stride] = 1
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(sampled, 8)
+        if count <= 1:
+            return obstacle
+        component = labels[rows[obstacle] // stride, cols[obstacle] // stride]
+        component_height = np.full(count, -np.inf, np.float32)
+        np.maximum.at(component_height, component, heights_m[obstacle])
+        low_flat = ((stats[:, cv2.CC_STAT_AREA] <
+                     s["artifact_max_component_samples"]) &
+                    (stats[:, cv2.CC_STAT_HEIGHT] <=
+                     s["artifact_max_component_rows"]) &
+                    (component_height < s["artifact_max_height_m"]))
+        low_flat[0] = False
+        filtered = obstacle.copy()
+        filtered[np.flatnonzero(obstacle)] &= ~low_flat[component]
+        return filtered
+
+    def _retain_supported_dropoffs(self, danger, rows, cols, image_shape):
+        """Tiny below-floor stereo islands remain unknown, not drop-off alarms."""
+        if not np.any(danger):
+            return danger
+        stride = self.settings["sample_stride"]
+        shape = tuple((dimension + stride - 1) // stride for dimension in image_shape)
+        sampled = np.zeros(shape, np.uint8)
+        sampled[rows[danger] // stride, cols[danger] // stride] = 1
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(sampled, 8)
+        component = labels[rows[danger] // stride, cols[danger] // stride]
+        supported = stats[:, cv2.CC_STAT_AREA] >= self.settings[
+            "danger_min_component_samples"]
+        supported[0] = False
+        filtered = danger.copy()
+        filtered[np.flatnonzero(danger)] &= supported[component]
+        return filtered
+
     def integrate(self, result, floor, pose, timestamp_s):
         """Integrate one observation, or only advance decay when pose/floor is unsafe."""
         self._decay(timestamp_s)
@@ -179,7 +231,7 @@ class ObstacleMap:
                     "traversed_cells": 0}
         self._recenter(pose)
         s = self.settings
-        p_cam, _, cols = sample_points(result, s["sample_stride"], s["min_range_m"],
+        p_cam, sample_rows, cols = sample_points(result, s["sample_stride"], s["min_range_m"],
                                        s["far_hint_range_m"])
         self._recent_obstacles[self._history_index] = 0
         self._recent_floor[self._history_index] = 0
@@ -199,10 +251,14 @@ class ObstacleMap:
                            s["obstacle_sigma_multiplier"] * sigma_z)
         trusted = p_cam[:, 2] <= s["max_range_m"]
         obstacle = trusted & (h >= min_h) & (h <= s["obstacle_max_height_m"])
+        obstacle = self._suppress_flat_obstacle_fragments(
+            obstacle, h, sample_rows, cols, result.disparity.shape)
         floor_point = trusted & (np.abs(h) <= s["floor_height_tol_m"])
         danger_threshold = np.maximum(s["hole_min_below_m"],
                                       s["danger_sigma_multiplier"] * sigma_z)
         danger = trusted & (h <= -danger_threshold)
+        danger = self._retain_supported_dropoffs(
+            danger, sample_rows, cols, result.disparity.shape)
         far_hints = int(np.count_nonzero(~trusted & (h >= min_h) &
                                           (h <= s["obstacle_max_height_m"])))
         x_world, z_world = gravity_to_world_xz(p_grav, pose)
@@ -240,6 +296,7 @@ class ObstacleMap:
             self.floor_hits.ravel()[floor_flat] += np.where(
                 dense, s["floor_evidence_per_frame"],
                 s["floor_sparse_evidence_per_frame"])
+            self.last_floor_seen.ravel()[floor_flat] = timestamp_s
             self.hits.ravel()[floor_flat] = np.maximum(
                 0, self.hits.ravel()[floor_flat] - s["free_clears_obstacle_per_frame"])
             self.danger_hits.ravel()[floor_flat] *= 0.5
@@ -275,6 +332,7 @@ class ObstacleMap:
         s = self.settings
         recent = self._recent_obstacles.sum(axis=0)
         age_ok = self._now_s - self.last_seen <= s["evidence_ttl_s"]
+        floor_age_ok = self._now_s - self.last_floor_seen <= s["floor_evidence_ttl_s"]
         states = np.zeros(self.hits.shape, np.uint8)
         danger = ((self._now_s - self.last_danger_seen <= s["danger_ttl_s"]) &
                   (self.danger_hits >= s["danger_evidence_required"]))
@@ -283,7 +341,7 @@ class ObstacleMap:
                              s["obstacle_min_vertical_span_m"]))
         obstacle = (age_ok & (self.hits >= s["obstacle_evidence_required"]) &
                     height_supported)
-        free = (age_ok & (self.floor_hits >= s["floor_evidence_required"]) &
+        free = (floor_age_ok & (self.floor_hits >= s["floor_evidence_required"]) &
                 (self.hits < 0.5) & (recent == 0) & ~danger)
         states[free] = self.FREE
         states[obstacle] = self.OBSTACLE
@@ -296,6 +354,11 @@ class ObstacleMap:
         if not (0 <= ix < self.side and 0 <= iz < self.side):
             return "unknown"
         return ("unknown", "free", "obstacle", "unknown")[self.state_grid()[iz, ix]]
+
+    def walked_path_mask(self):
+        """Recent tracked body footprints, separate from FREE cell evidence."""
+        return self._now_s - self.last_traversed <= self.settings[
+            "traversal_display_ttl_s"]
 
     def nearest_obstacle(self, direction_deg=0.0, width_deg=20.0):
         """Distance to known obstacle; None means no known hit, not clear space."""

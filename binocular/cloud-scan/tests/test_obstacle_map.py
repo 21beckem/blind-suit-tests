@@ -1,6 +1,7 @@
 """Deterministic metric geometry and rolling-map fixtures."""
 
 import math
+import hashlib
 import json
 import io
 from contextlib import redirect_stdout
@@ -24,7 +25,7 @@ from module.map_geometry import Pose2D
 from module.obstacle_map import ObstacleMap
 from module.pose_tracker import PoseTracker
 from module.latest_camera_feed import LatestCameraFeed
-from map_offline import discover_recordings, run_recording
+from map_offline import _fixture_checkpoint, discover_recordings, run_recording
 import map_live
 
 
@@ -189,6 +190,38 @@ class SingleFrameMapTests(unittest.TestCase):
 
 
 class TemporalMapTests(unittest.TestCase):
+    def test_measured_floor_outlasts_old_obstacle_paint_then_expires(self):
+        grid = ObstacleMap(load_config())
+        grid.floor_hits[60, 60] = 5
+        grid.last_floor_seen[60, 60] = 0
+        grid._decay(0)
+        grid._decay(8)
+        self.assertEqual(grid.state_grid()[60, 60], grid.FREE)
+        grid._decay(13)
+        self.assertEqual(grid.state_grid()[60, 60], grid.UNKNOWN)
+
+    def test_small_below_floor_island_is_unknown_not_dropoff(self):
+        grid = ObstacleMap(load_config())
+        block_rows, block_cols = np.meshgrid(
+            np.arange(30, 45, 3), np.arange(60, 75, 3), indexing="ij")
+        rows = np.concatenate((np.full(15, 3), block_rows.ravel()))
+        cols = np.concatenate((np.arange(3, 48, 3), block_cols.ravel()))
+        kept = grid._retain_supported_dropoffs(
+            np.ones(len(rows), bool), rows, cols, (90, 120))
+        self.assertFalse(np.any(kept[:15]))
+        self.assertTrue(np.all(kept[15:]))
+
+    def test_flat_tile_alias_suppressed_without_losing_thin_or_high_obstacle(self):
+        grid = ObstacleMap(load_config())
+        line = np.arange(3, 24, 3)
+        rows = np.concatenate((np.full(7, 6), line, np.full(7, 36)))
+        cols = np.concatenate((line, np.full(7, 45), line))
+        heights = np.concatenate((np.full(14, 0.4), np.full(7, 0.8)))
+        kept = grid._suppress_flat_obstacle_fragments(
+            np.ones(21, bool), heights, rows, cols, (60, 120))
+        self.assertFalse(np.any(kept[:7]))
+        self.assertTrue(np.all(kept[7:]))
+
     def test_obstacle_survives_recent_turn_then_fades_without_new_hits(self):
         grid = ObstacleMap(load_config())
         grid.hits[60, 60] = grid.settings["obstacle_evidence_cap"]
@@ -227,6 +260,10 @@ class TemporalMapTests(unittest.TestCase):
         grid.integrate(result, floor, Pose2D(), 0)
         self.assertEqual(grid.state_grid()[row, col], grid.UNKNOWN)
         self.assertEqual(grid.floor_hits[row, col], 0)
+        self.assertTrue(grid.walked_path_mask()[row, col])
+        grid._decay(grid.settings["traversal_display_ttl_s"] + 1)
+        self.assertFalse(grid.walked_path_mask()[row, col])
+        self.assertEqual(grid.state_grid()[row, col], grid.UNKNOWN)
 
     def test_low_flat_depth_artifact_stays_unknown(self):
         grid = ObstacleMap(load_config())
@@ -437,6 +474,25 @@ class PoseTrackerTests(unittest.TestCase):
 
 
 class OfflineRunnerTests(unittest.TestCase):
+    def test_exact_recording_checkpoint_rejects_painted_map_regression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recorded_camera_feed.avi"
+            path.write_bytes(b"small deterministic fixture")
+            config = load_config()
+            fixture = config["map"]["acceptance_fixture"]
+            fixture["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            row = {"frame": 950, "timestamp_s": 38.0, "map_free": 900,
+                   "map_obstacles": 1500, "map_danger_unknown": 250}
+            report = _fixture_checkpoint(path, config, {"fps": 25}, [row])
+            self.assertTrue(report["matched"])
+            self.assertTrue(all(report["checks"].values()))
+            row["map_obstacles"] = 1800
+            report = _fixture_checkpoint(path, config, {"fps": 25}, [row])
+            self.assertFalse(report["checks"]["fixture_obstacle_paint"])
+            path.write_bytes(b"different recording")
+            self.assertFalse(_fixture_checkpoint(
+                path, config, {"fps": 25}, [row])["matched"])
+
     def test_discovery_and_explicit_unsuitable_reports(self):
         self.assertIn(Path(__file__).resolve().parents[1] /
                       "module/recorded_camera_feed.avi", discover_recordings())

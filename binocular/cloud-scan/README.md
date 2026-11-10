@@ -125,9 +125,14 @@ they conflict with older obstacle evidence. They are not labeled free unless flo
 was actually observed there. The viewer hatches recently traversed unknown cells
 in teal so the walked route remains distinct from measured free floor. Below-floor
 warnings fade to unknown after they stop being observed.
+Small, low horizontal stereo fragments on patterned floors and isolated
+below-floor fragments remain unknown. This suppresses tile aliases and false
+drop-off warnings without marking those pixels free.
 Obstacle evidence now fades on a 5 s time scale: a confirmed but unobserved
 obstacle remains for roughly four seconds, then becomes unknown. This reduces
-old obstacle paint during a turn while retaining short-term memory.
+old obstacle paint during a turn while retaining short-term memory. Measured
+floor evidence fades on a 10 s time scale and expires after 12 s, so floor
+already seen before a turn remains available longer than obstacle paint.
 
 The camera cannot see the floor immediately around its own position. A connected
 green corridor through that blind strip cannot be inferred honestly from this
@@ -135,13 +140,18 @@ recording. The top-down viewer therefore leaves it unknown even when the person
 has walked through it; the map's `blind_zone()` query exposes this limitation.
 Offline `metrics.json` records `near_forward` counts for the first 1 m by 1 m
 ahead of the camera on every frame, including measured-floor and unknown cells.
+The exact apartment recording also has a 38 s checkpoint in `config.json` that
+rejects a return to the earlier excess obstacle and drop-off paint. Its hash
+keeps the checkpoint from applying to unrelated recordings.
 
 `module.ground_plane.GroundPlaneEstimator.fit(result, timestamp_s)` returns the floor
 normal, camera height, gravity transform, and fresh/usable flags.
 `module.pose_tracker.PoseTracker.update(result, floor, timestamp_s)` returns world
 X/Z/yaw and a tracking flag. `module.obstacle_map.ObstacleMap` integrates the frame and
-offers `cell_state(x_m, z_m)`, `nearest_obstacle(direction_deg, width_deg)`,
-`clearance_sectors()`, `blind_zone()`, and `tracking_ok`. Directions are relative to
+offers `cell_state(x_m, z_m)`, `walked_path_mask()`,
+`nearest_obstacle(direction_deg, width_deg)`, `clearance_sectors()`,
+`blind_zone()`, and `tracking_ok`. The walked path is a separate layer; it does
+not change the free/obstacle/unknown state. Directions are relative to
 camera forward; positive degrees point right. A `None` obstacle distance means there
 is no **known** obstacle in that query, not that the corridor is known free.
 
