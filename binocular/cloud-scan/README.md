@@ -147,6 +147,11 @@ The floor fitter independently rejects normals more than 50 degrees from
 upright, even if a sequence of wrong fits gradually rotates its prior. Mapping
 pauses when the floor fit is stale; a drop-off warning also needs enough
 measured floor in that frame to establish the reference surface.
+Once a trustworthy floor has been found, a spatially spread prior-guided fit
+can recover it through missing and aliased depth on tile or concrete grids when
+ordinary RANSAC fails. Large sparse, low, nearly flat grid-line aliases remain
+unknown rather than becoming obstacles or invented free cells. Initial floor
+acquisition keeps the stricter RANSAC threshold.
 
 `module.ground_plane.GroundPlaneEstimator.fit(result, timestamp_s)` returns the floor
 normal, camera height, gravity transform, and fresh/usable flags.

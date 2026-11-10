@@ -100,6 +100,56 @@ def panorama_frame(yaw_deg):
 
 
 class GroundGeometryTests(unittest.TestCase):
+    def test_uneven_concrete_seams_recover_floor_without_phantom_obstacles(self):
+        config = load_config()
+        clean, _, height = synthetic_scene()
+        rows, cols = np.indices(clean.disparity.shape)
+        seams = (((cols + rows // 10) % 31 < 3) | (rows % 29 < 3))
+        rng = np.random.default_rng(91)
+        keep = (rng.random(clean.disparity.shape) < 0.18) & ~seams
+        alias = seams & (clean.confidence == 2)
+        disparity = clean.disparity.copy()
+        disparity[alias] *= 1.52 + 0.03 * np.sin(cols[alias] / 17)
+        concrete = DepthResult(
+            disparity, np.where(keep | alias, 2, 0).astype(np.uint8),
+            clean.gray, clean.Q, clean.max_disparity)
+        estimator = GroundPlaneEstimator(config)
+        self.assertTrue(estimator.fit(clean, 0).fresh)
+        grid = ObstacleMap(config)
+        for frame in range(1, 4):
+            t = frame / 25
+            floor = estimator.fit(concrete, t)
+            self.assertTrue(floor.fresh)
+            self.assertAlmostEqual(floor.height_m, height, delta=0.08)
+            grid.integrate(concrete, floor, Pose2D(), t)
+        self.assertEqual(np.count_nonzero(grid.state_grid() == grid.OBSTACLE), 0)
+        self.assertGreater(np.count_nonzero(grid.state_grid() == grid.FREE), 100)
+
+    def test_prior_recovers_floor_through_grid_aliases_and_sparse_depth(self):
+        config = load_config()
+        clean, _, height = synthetic_scene()
+        estimator = GroundPlaneEstimator(config)
+        self.assertTrue(estimator.fit(clean, 0).fresh)
+        rng = np.random.default_rng(73)
+        rows, cols = np.indices(clean.disparity.shape)
+        grid_lines = (rows % 24 < 3) | (cols % 24 < 3)
+        keep = (rng.random(clean.disparity.shape) < 0.15) & ~grid_lines
+        alias = grid_lines & (clean.confidence == 2)
+        confidence = np.where(keep | alias, 2, 0).astype(np.uint8)
+        disparity = clean.disparity.copy()
+        disparity[alias] *= 1.6
+        tiled = DepthResult(disparity, confidence, clean.gray, clean.Q,
+                            clean.max_disparity)
+        recovered = estimator.fit(tiled, 0.04)
+        self.assertTrue(recovered.fresh)
+        self.assertAlmostEqual(recovered.height_m, height, delta=0.08)
+        mapped = ObstacleMap(config)
+        for frame in range(1, 4):
+            t = frame / 25
+            mapped.integrate(tiled, estimator.fit(tiled, t), Pose2D(), t)
+        self.assertEqual(np.count_nonzero(mapped.state_grid() == mapped.OBSTACLE), 0)
+        self.assertGreater(np.count_nonzero(mapped.state_grid() == mapped.FREE), 100)
+
     def test_upright_bound_rejects_a_wall_despite_gradual_prior_tilt(self):
         estimator = GroundPlaneEstimator(load_config())
         estimator._normal = np.array([0., -0.7, -math.sqrt(1 - 0.7 ** 2)])
@@ -144,6 +194,16 @@ class GroundGeometryTests(unittest.TestCase):
         result.confidence[:] = 2
         floor = GroundPlaneEstimator(load_config()).fit(result, 0)
         self.assertFalse(floor.usable)
+
+    def test_prior_does_not_turn_a_wall_into_floor(self):
+        config = load_config()
+        clean, _, _ = synthetic_scene()
+        estimator = GroundPlaneEstimator(config)
+        self.assertTrue(estimator.fit(clean, 0).fresh)
+        wall, _, _ = synthetic_scene()
+        wall.disparity[:] = wall.Q[2, 3] / wall.Q[3, 2] / 1.5
+        wall.confidence[:] = 2
+        self.assertFalse(estimator.fit(wall, 0.04).fresh)
 
 
 class SingleFrameMapTests(unittest.TestCase):
@@ -539,12 +599,15 @@ class OfflineRunnerTests(unittest.TestCase):
             config = load_config()
             fixture = config["map"]["acceptance_fixture"]
             fixture["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            fixture["min_floor_fresh_frames"] = 2
             row = {"frame": 950, "timestamp_s": 38.0, "map_free": 900,
                    "map_obstacles": 1500, "map_danger_unknown": 250,
-                   "tracking_ok": True, "reset_map": False}
+                   "tracking_ok": True, "reset_map": False,
+                   "floor_fresh": True}
             early = {"frame": 75, "timestamp_s": 3.0, "map_free": 20,
                      "map_obstacles": 0, "map_danger_unknown": 0,
-                     "tracking_ok": True, "reset_map": False}
+                     "tracking_ok": True, "reset_map": False,
+                     "floor_fresh": True}
             frames = [early, row]
             report = _fixture_checkpoint(path, config, {"fps": 25}, frames)
             self.assertTrue(report["matched"])

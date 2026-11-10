@@ -125,6 +125,8 @@ def _fixture_checkpoint(path, config, metadata, frames):
         first_tracked is not None and
         all(row["tracking_ok"] for row in frames[first_tracked:]))
     checks["fixture_no_map_reset"] = not any(row["reset_map"] for row in frames)
+    checks["fixture_floor_fit_coverage"] = sum(
+        row["floor_fresh"] for row in frames) >= fixture["min_floor_fresh_frames"]
     return {"matched": True, "timestamp_s": fixture["checkpoint_s"],
             "frame": checkpoint["frame"] if timed else None,
             "counts": ({key: checkpoint[key] for key in

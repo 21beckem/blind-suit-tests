@@ -27,6 +27,40 @@ class GroundPlaneEstimator:
         self._height = None
         self._last_good_s = None
 
+    def _estimate_from_prior(self, points):
+        """Refit a spatially spread floor patch despite periodic stereo aliases."""
+        s = self.settings
+        if self._normal is None or self._height is None:
+            return None
+        near = points[np.abs(points @ self._normal + self._height) <=
+                      s["floor_prior_band_m"]].astype(np.float64)
+        if len(near) < s["floor_prior_min_inliers"]:
+            return None
+        if (np.ptp(near[:, 0]) < s["floor_prior_min_span_x_m"] or
+                np.ptp(near[:, 2]) < s["floor_prior_min_span_z_m"]):
+            return None
+        center = near.mean(axis=0)
+        _, _, vt = np.linalg.svd(near - center, full_matrices=False)
+        normal = vt[-1]
+        if normal[1] > 0:
+            normal = -normal
+        height = float(-normal @ center)
+        inlier = np.abs(points @ normal + height) <= s["floor_inlier_m"]
+        count = int(np.count_nonzero(inlier))
+        if count < s["floor_prior_min_inliers"] or count < (
+                s["floor_prior_min_fraction"] * len(points)):
+            return None
+        support = points[inlier]
+        if (np.ptp(support[:, 0]) < s["floor_prior_min_span_x_m"] or
+                np.ptp(support[:, 2]) < s["floor_prior_min_span_z_m"]):
+            return None
+        if (normal @ self._normal < np.cos(np.deg2rad(s["floor_prior_max_tilt_deg"])) or
+                -normal[1] < np.cos(np.deg2rad(s["floor_max_absolute_tilt_deg"])) or
+                abs(height - self._height) > s["floor_prior_max_height_change_m"] or
+                not s["floor_min_height_m"] <= height <= s["floor_max_height_m"]):
+            return None
+        return normal, height, count
+
     def _estimate(self, points):
         s = self.settings
         if len(points) < s["floor_min_inliers"]:
@@ -34,6 +68,7 @@ class GroundPlaneEstimator:
         if len(points) > s["floor_ransac_samples"]:
             indices = self._rng.choice(len(points), s["floor_ransac_samples"], replace=False)
             points = points[indices]
+        guided = self._estimate_from_prior(points)
         triplets = self._rng.integers(0, len(points), (s["floor_iterations"], 3))
         triples = points[triplets].astype(np.float64)
         normals = np.cross(triples[:, 1] - triples[:, 0], triples[:, 2] - triples[:, 0])
@@ -51,7 +86,7 @@ class GroundPlaneEstimator:
         heights = -np.einsum("ij,ij->i", normals, triples[:, 0])
         valid &= (heights >= s["floor_min_height_m"]) & (heights <= s["floor_max_height_m"])
         if not np.any(valid):
-            return None
+            return guided
         normals = normals[valid]
         heights = heights[valid]
         distance = np.abs(points.astype(np.float64) @ normals.T + heights)
@@ -60,7 +95,7 @@ class GroundPlaneEstimator:
         inliers = distance[:, best] <= s["floor_inlier_m"]
         count = int(np.count_nonzero(inliers))
         if count < s["floor_min_inliers"] or count < s["floor_min_fraction"] * len(points):
-            return None
+            return guided
         subset = points[inliers].astype(np.float64)
         center = subset.mean(axis=0)
         _, _, vt = np.linalg.svd(subset - center, full_matrices=False)
@@ -70,7 +105,7 @@ class GroundPlaneEstimator:
         height = float(-normal @ center)
         if (normal @ prior < cos_gate or -normal[1] < upright_cos or
                 not s["floor_min_height_m"] <= height <= s["floor_max_height_m"]):
-            return None
+            return guided
         refined_count = int(np.count_nonzero(np.abs(points @ normal + height) <= s["floor_inlier_m"]))
         return normal, height, refined_count
 

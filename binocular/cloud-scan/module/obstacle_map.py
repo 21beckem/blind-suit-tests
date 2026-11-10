@@ -192,15 +192,31 @@ class ObstacleMap:
             return obstacle
         component = labels[rows[obstacle] // stride, cols[obstacle] // stride]
         component_height = np.full(count, -np.inf, np.float32)
+        component_low = np.full(count, np.inf, np.float32)
         np.maximum.at(component_height, component, heights_m[obstacle])
+        np.minimum.at(component_low, component, heights_m[obstacle])
         low_flat = ((stats[:, cv2.CC_STAT_AREA] <
                      s["artifact_max_component_samples"]) &
                     (stats[:, cv2.CC_STAT_HEIGHT] <=
                      s["artifact_max_component_rows"]) &
                     (component_height < s["artifact_max_height_m"]))
+        box_area = (stats[:, cv2.CC_STAT_WIDTH] *
+                    stats[:, cv2.CC_STAT_HEIGHT])
+        grid_alias = ((stats[:, cv2.CC_STAT_AREA] >=
+                       s["artifact_grid_min_component_samples"]) &
+                      (stats[:, cv2.CC_STAT_WIDTH] >=
+                       s["artifact_grid_min_extent_cells"]) &
+                      (stats[:, cv2.CC_STAT_HEIGHT] >=
+                       s["artifact_grid_min_extent_cells"]) &
+                      (stats[:, cv2.CC_STAT_AREA] / np.maximum(box_area, 1) <=
+                       s["artifact_grid_max_fill_fraction"]) &
+                      (component_height - component_low <=
+                       s["artifact_grid_max_height_span_m"]) &
+                      (component_height < s["artifact_grid_max_height_m"]))
         low_flat[0] = False
+        grid_alias[0] = False
         filtered = obstacle.copy()
-        filtered[np.flatnonzero(obstacle)] &= ~low_flat[component]
+        filtered[np.flatnonzero(obstacle)] &= ~(low_flat | grid_alias)[component]
         return filtered
 
     def _retain_supported_dropoffs(self, danger, rows, cols, image_shape):
