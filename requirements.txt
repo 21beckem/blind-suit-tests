@@ -1,3 +1,4 @@
+numpy
 opencv-python
 pillow
 torch
@@ -6,3 +7,5 @@ pyserial
 matplotlib
 open3d
 scipy
+opencv-python-headless
+scikit-image
