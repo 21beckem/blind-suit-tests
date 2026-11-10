@@ -1,0 +1,27 @@
+{
+  "calibration": "calibration.npz",
+  "camera": {
+    "index": 1,
+    "width": 1280,
+    "height": 480,
+    "rotate_180": false
+  },
+  "images": {
+    "left": "img/raw_left.png",
+    "right": "img/raw_right.png"
+  },
+  "depth": {
+    "rectify": true,
+    "num_disp": 80,
+    "block": 5,
+    "scale": 1.0,
+    "max_rel_err": 0.1,
+    "tex_min": 3.0
+  },
+  "benchmark": {
+    "output": "stereo_out/benchmark.json"
+  },
+  "window": {
+    "name": "Stereo depth: left image | depth"
+  }
+}
