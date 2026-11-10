@@ -230,6 +230,12 @@ class ObstacleMap:
                     "danger_cells": 0, "far_hints": 0, "carved_cells": 0,
                     "traversed_cells": 0}
         self._recenter(pose)
+        if not floor.fresh:
+            traversed = self._clear_traversed_to_unknown(
+                pose, timestamp_s, np.empty(0, np.int64))
+            return {"integrated": False, "obstacle_cells": 0, "floor_cells": 0,
+                    "danger_cells": 0, "far_hints": 0, "carved_cells": 0,
+                    "traversed_cells": traversed}
         s = self.settings
         p_cam, sample_rows, cols = sample_points(result, s["sample_stride"], s["min_range_m"],
                                        s["far_hint_range_m"])
@@ -275,8 +281,8 @@ class ObstacleMap:
         danger_flat = np.unique(flat[inside & danger])
         floor_flat = np.setdiff1d(floor_flat, np.union1d(obs_flat, danger_flat),
                                   assume_unique=True)
-        if not floor.fresh:
-            floor_flat = floor_flat[:0]
+        if len(floor_flat) < s["danger_min_floor_support_cells"]:
+            danger_flat = danger_flat[:0]
         if len(obs_flat):
             raw = flat[inside & obstacle]
             height = h[inside & obstacle]

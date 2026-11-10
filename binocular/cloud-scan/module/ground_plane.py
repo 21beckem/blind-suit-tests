@@ -44,6 +44,10 @@ class GroundPlaneEstimator:
         prior = self._normal if self._normal is not None else np.array([0., -1., 0.])
         cos_gate = np.cos(np.deg2rad(s["floor_max_tilt_deg"]))
         valid &= (normals @ prior) >= cos_gate
+        # A wall can rotate the previous-normal prior a little every frame.
+        # Keep an independent upright bound so this cannot accumulate to 90°.
+        upright_cos = np.cos(np.deg2rad(s["floor_max_absolute_tilt_deg"]))
+        valid &= -normals[:, 1] >= upright_cos
         heights = -np.einsum("ij,ij->i", normals, triples[:, 0])
         valid &= (heights >= s["floor_min_height_m"]) & (heights <= s["floor_max_height_m"])
         if not np.any(valid):
@@ -64,7 +68,7 @@ class GroundPlaneEstimator:
         if normal[1] > 0:
             normal = -normal
         height = float(-normal @ center)
-        if (normal @ prior < cos_gate or
+        if (normal @ prior < cos_gate or -normal[1] < upright_cos or
                 not s["floor_min_height_m"] <= height <= s["floor_max_height_m"]):
             return None
         refined_count = int(np.count_nonzero(np.abs(points @ normal + height) <= s["floor_inlier_m"]))

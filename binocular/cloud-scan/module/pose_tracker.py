@@ -54,6 +54,9 @@ class PoseTracker:
         self.rejection = None
         self._last_good_s = None
         self._lost_since_s = None
+        self._last_usable_floor = None
+        self._last_usable_floor_s = None
+        self._ever_initialized = False
 
     @staticmethod
     def _camera_matrix(result):
@@ -244,16 +247,28 @@ class PoseTracker:
         self.reset_map = False
         self.inliers = 0
         self.rejection = None
-        if not floor.usable:
+        floor_bridge = False
+        if floor.usable:
+            self._last_usable_floor = floor
+            self._last_usable_floor_s = timestamp_s
+        elif (self._anchor is not None and self._last_usable_floor is not None and
+              timestamp_s - self._last_usable_floor_s <=
+              self.settings["tracking_floor_bridge_s"]):
+            # Visual motion can keep the pose alive briefly while floor fitting
+            # fails. ObstacleMap still refuses to integrate without a fresh floor.
+            floor = self._last_usable_floor
+            floor_bridge = True
+        else:
             return self._lost(timestamp_s, "floor_lost")
         if self._anchor is None:
             origin = Pose2D()
             if not self._set_anchor(result, floor, origin):
                 return self._lost(timestamp_s, "few_features")
             self._set_previous(result, floor, origin)
-            if self._lost_since_s is not None:
+            if self._ever_initialized and self._lost_since_s is not None:
                 self.reset_map = True
                 self.reset_count += 1
+            self._ever_initialized = True
             self.pose = origin
             self.tracking_ok = True
             self._last_good_s = timestamp_s
@@ -273,13 +288,14 @@ class PoseTracker:
         self.tracking_ok = True
         self._last_good_s = timestamp_s
         self._lost_since_s = None
-        self.method = method
+        self.method = method + "_floor_bridge" if floor_bridge else method
         self._set_previous(result, floor, pose)
         anchor_distance = math.hypot(pose.x_m - self._anchor_pose.x_m,
                                      pose.z_m - self._anchor_pose.z_m)
         anchor_yaw_delta = abs(math.degrees(
             (pose.yaw_rad - self._anchor_pose.yaw_rad + math.pi) % (2 * math.pi) - math.pi))
-        if (anchor_distance >= self.settings["keyframe_translation_m"] or
+        if not floor_bridge and floor.fresh and (
+                anchor_distance >= self.settings["keyframe_translation_m"] or
                 anchor_yaw_delta >= self.settings["keyframe_yaw_deg"]):
             self._set_anchor(result, floor, pose)
         return pose

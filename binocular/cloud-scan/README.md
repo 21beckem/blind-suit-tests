@@ -140,9 +140,13 @@ recording. The top-down viewer therefore leaves it unknown even when the person
 has walked through it; the map's `blind_zone()` query exposes this limitation.
 Offline `metrics.json` records `near_forward` counts for the first 1 m by 1 m
 ahead of the camera on every frame, including measured-floor and unknown cells.
-The exact apartment recording also has a 38 s checkpoint in `config.json` that
-rejects a return to the earlier excess obstacle and drop-off paint. Its hash
+The exact apartment recording has 3 s and 38 s checkpoints in `config.json` that
+reject a return to the earlier excess obstacle and drop-off paint. Its hash
 keeps the checkpoint from applying to unrelated recordings.
+The floor fitter independently rejects normals more than 50 degrees from
+upright, even if a sequence of wrong fits gradually rotates its prior. Mapping
+pauses when the floor fit is stale; a drop-off warning also needs enough
+measured floor in that frame to establish the reference surface.
 
 `module.ground_plane.GroundPlaneEstimator.fit(result, timestamp_s)` returns the floor
 normal, camera height, gravity transform, and fresh/usable flags.
@@ -160,6 +164,11 @@ right, Y up, Z forward, with the floor at Y=0. The map tracks a few local metres
 decays stale evidence; it does not claim a global scan or labeled obstacle accuracy.
 Tracking loss stops integration, and a long loss starts a fresh local map rather than
 joining poses across an unobserved interval.
+Visual tracking can bridge a floor dropout for up to 0.6 s using the last
+usable floor orientation; mapping still pauses until a fresh floor returns.
+Initial floor acquisition does not count as a map reset. The exact apartment
+fixture checks that tracking stays continuous after acquisition and that no
+reset occurs.
 
 `DepthResult` contains `disparity` (float32 pixels, 0 invalid), `confidence` (0 invalid,
 1 weak, 2 solid), `gray` (rectified left grayscale), `Q` (working-resolution reprojection

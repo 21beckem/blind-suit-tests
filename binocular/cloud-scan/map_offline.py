@@ -106,11 +106,35 @@ def _fixture_checkpoint(path, config, metadata, frames):
             "fixture_dropoff_paint": checkpoint["map_danger_unknown"] <=
                                      fixture["max_danger_unknown_cells"],
         })
+    early = (min(frames, key=lambda row: abs(
+        row["timestamp_s"] - fixture["early_checkpoint_s"])) if frames else None)
+    early_timed = (early is not None and
+                   abs(early["timestamp_s"] - fixture["early_checkpoint_s"]) <=
+                   0.5 / metadata["fps"] + 1e-6)
+    checks["fixture_early_checkpoint_present"] = bool(early_timed)
+    if early_timed:
+        checks.update({
+            "fixture_early_obstacle_paint": early["map_obstacles"] <=
+                                            fixture["early_max_obstacle_cells"],
+            "fixture_early_dropoff_paint": early["map_danger_unknown"] <=
+                                           fixture["early_max_danger_unknown_cells"],
+        })
+    first_tracked = next((i for i, row in enumerate(frames)
+                          if row["tracking_ok"]), None)
+    checks["fixture_tracking_continuous_after_start"] = (
+        first_tracked is not None and
+        all(row["tracking_ok"] for row in frames[first_tracked:]))
+    checks["fixture_no_map_reset"] = not any(row["reset_map"] for row in frames)
     return {"matched": True, "timestamp_s": fixture["checkpoint_s"],
             "frame": checkpoint["frame"] if timed else None,
             "counts": ({key: checkpoint[key] for key in
                         ("map_free", "map_obstacles", "map_danger_unknown")}
-                       if timed else None), "checks": checks}
+                       if timed else None),
+            "early_timestamp_s": fixture["early_checkpoint_s"],
+            "early_frame": early["frame"] if early_timed else None,
+            "early_counts": ({key: early[key] for key in
+                             ("map_free", "map_obstacles", "map_danger_unknown")}
+                            if early_timed else None), "checks": checks}
 
 
 def run_recording(path, config, output_root=None, debug_interval_s=None):
@@ -243,6 +267,8 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
         "decoded_all_advertised_frames": (metadata["advertised_frames"] <= 0 or
                                           len(frames) == metadata["advertised_frames"]),
         "no_integration_while_tracking_lost": safety_ok,
+        "no_integration_without_fresh_floor": all(
+            not row["integrated"] or row["floor_fresh"] for row in frames),
         "mapping_p95_under_30_ms": bool(mapping_times and
                                         np.percentile(mapping_times, 95) < 30.0),
         "near_free_requires_floor_evidence": all(

@@ -100,6 +100,16 @@ def panorama_frame(yaw_deg):
 
 
 class GroundGeometryTests(unittest.TestCase):
+    def test_upright_bound_rejects_a_wall_despite_gradual_prior_tilt(self):
+        estimator = GroundPlaneEstimator(load_config())
+        estimator._normal = np.array([0., -0.7, -math.sqrt(1 - 0.7 ** 2)])
+        wall_normal = np.array([0., -0.1, -math.sqrt(1 - 0.1 ** 2)])
+        rng = np.random.default_rng(19)
+        x = rng.uniform(-0.5, 0.5, 500)
+        z = rng.uniform(1.0, 2.0, 500)
+        y = (-1.2 - wall_normal[2] * z) / wall_normal[1]
+        self.assertIsNone(estimator._estimate(np.column_stack((x, y, z))))
+
     def test_pitched_floor_height_and_gravity_frame(self):
         result, expected_rotation, camera_height = synthetic_scene(1.5)
         floor = GroundPlaneEstimator(load_config()).fit(result, 0.0)
@@ -190,6 +200,20 @@ class SingleFrameMapTests(unittest.TestCase):
 
 
 class TemporalMapTests(unittest.TestCase):
+    def test_stale_floor_does_not_paint_obstacles_or_danger(self):
+        config = load_config()
+        result, _, _ = synthetic_scene(1.5, dropoff_m=0.35)
+        good = GroundPlaneEstimator(config).fit(result, 0)
+        stale = FloorEstimate(good.normal_cam, good.height_m,
+                              good.rotation_grav_cam, False, True, 0.2,
+                              good.inliers, good.candidates)
+        grid = ObstacleMap(config)
+        for frame in range(4):
+            update = grid.integrate(result, stale, Pose2D(), frame / 25)
+            self.assertFalse(update["integrated"])
+        self.assertEqual(np.count_nonzero(grid.state_grid() == grid.OBSTACLE), 0)
+        self.assertEqual(np.count_nonzero(grid.state_grid() == grid.DANGER), 0)
+
     def test_measured_floor_outlasts_old_obstacle_paint_then_expires(self):
         grid = ObstacleMap(load_config())
         grid.floor_hits[60, 60] = 5
@@ -377,6 +401,40 @@ class TemporalMapTests(unittest.TestCase):
 
 
 class PoseTrackerTests(unittest.TestCase):
+    def test_initial_floor_acquisition_is_not_a_tracking_reset(self):
+        tracker = PoseTracker(load_config())
+        missing = FloorEstimate(None, None, None, False, False, float("inf"), 0, 0)
+        textured = panorama_frame(0)
+        self.assertFalse(tracker.update(textured, missing, 0).tracking_ok)
+        normal = np.array([0., -1., 0.])
+        good = FloorEstimate(normal, 1.1, gravity_rotation(normal),
+                             True, True, 0, 500, 500)
+        self.assertTrue(tracker.update(textured, good, 2.0).tracking_ok)
+        self.assertFalse(tracker.reset_map)
+        self.assertEqual(tracker.reset_count, 0)
+
+    def test_visual_tracking_bridges_short_floor_dropout_without_mapping(self):
+        config = load_config()
+        tracker = PoseTracker(config)
+        grid = ObstacleMap(config)
+        normal = np.array([0., -1., 0.])
+        good = FloorEstimate(normal, 1.1, gravity_rotation(normal),
+                             True, True, 0, 500, 500)
+        missing = FloorEstimate(None, None, None, False, False, 1.1, 0, 0)
+        self.assertTrue(tracker.update(panorama_frame(0), good, 0).tracking_ok)
+        for degrees in (3, 6, 9):
+            t = degrees / 75
+            result = panorama_frame(degrees)
+            pose = tracker.update(result, missing, t)
+            self.assertTrue(pose.tracking_ok)
+            self.assertEqual(tracker.method, "lk_floor_bridge")
+            self.assertFalse(grid.integrate(result, missing, pose, t)["integrated"])
+        self.assertTrue(tracker.update(panorama_frame(12), good, 0.16).tracking_ok)
+        self.assertEqual(tracker.reset_count, 0)
+        self.assertFalse(tracker.update(
+            panorama_frame(15), missing,
+            0.16 + config["map"]["tracking_floor_bridge_s"] + 0.01).tracking_ok)
+
     def test_long_tracking_loss_requests_new_local_map(self):
         config = load_config()
         level_normal = np.array([0., -1., 0.])
@@ -482,16 +540,30 @@ class OfflineRunnerTests(unittest.TestCase):
             fixture = config["map"]["acceptance_fixture"]
             fixture["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
             row = {"frame": 950, "timestamp_s": 38.0, "map_free": 900,
-                   "map_obstacles": 1500, "map_danger_unknown": 250}
-            report = _fixture_checkpoint(path, config, {"fps": 25}, [row])
+                   "map_obstacles": 1500, "map_danger_unknown": 250,
+                   "tracking_ok": True, "reset_map": False}
+            early = {"frame": 75, "timestamp_s": 3.0, "map_free": 20,
+                     "map_obstacles": 0, "map_danger_unknown": 0,
+                     "tracking_ok": True, "reset_map": False}
+            frames = [early, row]
+            report = _fixture_checkpoint(path, config, {"fps": 25}, frames)
             self.assertTrue(report["matched"])
             self.assertTrue(all(report["checks"].values()))
+            row["tracking_ok"] = False
+            self.assertFalse(_fixture_checkpoint(
+                path, config, {"fps": 25}, frames)["checks"][
+                    "fixture_tracking_continuous_after_start"])
+            row["tracking_ok"] = True
+            early["map_danger_unknown"] = 1
+            report = _fixture_checkpoint(path, config, {"fps": 25}, frames)
+            self.assertFalse(report["checks"]["fixture_early_dropoff_paint"])
+            early["map_danger_unknown"] = 0
             row["map_obstacles"] = 1800
-            report = _fixture_checkpoint(path, config, {"fps": 25}, [row])
+            report = _fixture_checkpoint(path, config, {"fps": 25}, frames)
             self.assertFalse(report["checks"]["fixture_obstacle_paint"])
             path.write_bytes(b"different recording")
             self.assertFalse(_fixture_checkpoint(
-                path, config, {"fps": 25}, [row])["matched"])
+                path, config, {"fps": 25}, frames)["matched"])
 
     def test_discovery_and_explicit_unsuitable_reports(self):
         self.assertIn(Path(__file__).resolve().parents[1] /
