@@ -57,6 +57,17 @@ class PoseTracker:
         self._last_usable_floor = None
         self._last_usable_floor_s = None
         self._ever_initialized = False
+        self._places = []
+        self._last_place_s = -float("inf")
+        self._last_loop_check_s = -float("inf")
+        self.loop_closure = None
+        self.loop_count = 0
+        self._relocalize_until_s = -float("inf")
+        self.map_epoch = 0
+        self.place_candidates = 0
+        self.place_best_matches = 0
+        self.place_best_inliers = 0
+        self.place_best_solution = None
 
     @staticmethod
     def _camera_matrix(result):
@@ -111,7 +122,7 @@ class PoseTracker:
         points_3d, valid = self._lift(result, points_2d)
         return points_2d[valid], points_3d[valid]
 
-    def _set_anchor(self, result, floor, pose):
+    def _set_anchor(self, result, floor, pose, timestamp_s=None):
         points_2d, points_3d = self._bucketed_corners(result)
         if len(points_2d) < self.settings["tracking_min_inliers"]:
             return False
@@ -132,6 +143,18 @@ class PoseTracker:
             self._orb_keypoints = []
             self._orb_descriptors = None
             self._orb_points_3d = None
+        if (timestamp_s is not None and self._orb_descriptors is not None and
+                len(self._orb_descriptors) >= self.settings["tracking_min_inliers"] and
+                timestamp_s - self._last_place_s >= self.settings["place_interval_s"]):
+            self._places.append({"timestamp_s": timestamp_s, "pose": pose,
+                                 "epoch": self.map_epoch,
+                                 "floor": floor,
+                                 "keypoints": self._orb_keypoints,
+                                 "descriptors": self._orb_descriptors.copy(),
+                                 "points_3d": self._orb_points_3d.copy()})
+            self._last_place_s = timestamp_s
+            if len(self._places) > self.settings["place_max_keyframes"]:
+                self._places.pop(0)
         return True
 
     def _set_previous(self, result, floor, pose):
@@ -165,25 +188,29 @@ class PoseTracker:
         valid &= (target[:, 1] >= 0) & (target[:, 1] < h)
         return self._previous_points_3d[valid], target[valid], self._previous_points_2d[valid]
 
-    def _orb_correspondences(self, result):
-        if self._orb_descriptors is None or len(self._orb_descriptors) < 25:
+    def _orb_correspondences(self, result, place=None, target_features=None):
+        descriptors_old = (self._orb_descriptors if place is None else place["descriptors"])
+        if descriptors_old is None or len(descriptors_old) < 25:
             return None
-        keypoints, descriptors = self._orb.detectAndCompute(result.gray, None)
+        keypoints, descriptors = (target_features if target_features is not None else
+                                  self._orb.detectAndCompute(result.gray, None))
         if descriptors is None or len(descriptors) < 25:
             return None
         matches = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(
-            self._orb_descriptors, descriptors, k=2)
+            descriptors_old, descriptors, k=2)
         good = [pair[0] for pair in matches if len(pair) == 2 and
                 pair[0].distance < self.settings["tracking_orb_ratio"] * pair[1].distance]
         if len(good) < self.settings["tracking_min_inliers"]:
             return None
-        source = np.array([self._orb_keypoints[m.queryIdx].pt for m in good], np.float32)
+        old_keypoints = self._orb_keypoints if place is None else place["keypoints"]
+        old_points = self._orb_points_3d if place is None else place["points_3d"]
+        source = np.array([old_keypoints[m.queryIdx].pt for m in good], np.float32)
         target = np.array([keypoints[m.trainIdx].pt for m in good], np.float32)
-        points_3d = np.array([self._orb_points_3d[m.queryIdx] for m in good], np.float32)
+        points_3d = np.array([old_points[m.queryIdx] for m in good], np.float32)
         return points_3d, target, source
 
     def _solve(self, correspondences, result, floor, timestamp_s,
-               source_floor=None, source_pose=None):
+               source_floor=None, source_pose=None, check_motion=True):
         if correspondences is None:
             self.rejection = "few_matches"
             return None
@@ -232,7 +259,7 @@ class PoseTracker:
                    c * center_anchor_grav[2])
         pose = Pose2D(float(x_world), float(z_world),
                       float(anchor_yaw + yaw_relative), True)
-        if self._last_good_s is not None:
+        if check_motion and self._last_good_s is not None:
             dt = max(timestamp_s - self._last_good_s, 1e-3)
             speed = math.hypot(pose.x_m - self.pose.x_m,
                                pose.z_m - self.pose.z_m) / dt
@@ -243,8 +270,91 @@ class PoseTracker:
                 return None
         return pose, len(inliers)
 
+    def _try_loop_closure(self, result, floor, pose, timestamp_s):
+        s = self.settings
+        if timestamp_s - self._last_loop_check_s < s["place_check_interval_s"]:
+            return pose
+        self._last_loop_check_s = timestamp_s
+        relocalizing = timestamp_s <= self._relocalize_until_s
+        candidates = []
+        for place in self._places:
+            if timestamp_s - place["timestamp_s"] < s["place_min_age_s"]:
+                continue
+            distance = math.hypot(pose.x_m - place["pose"].x_m,
+                                  pose.z_m - place["pose"].z_m)
+            yaw = abs((pose.yaw_rad - place["pose"].yaw_rad + math.pi) %
+                      (2 * math.pi) - math.pi)
+            if relocalizing or (distance <= s["place_search_radius_m"] and
+                                yaw <= math.radians(s["place_search_yaw_deg"])):
+                candidates.append((distance + yaw, place))
+        if not candidates:
+            return pose
+        self.place_candidates = len(candidates)
+        features = self._orb.detectAndCompute(result.gray, None)
+        best = None
+        limit = len(candidates) if relocalizing else s["place_max_candidates"]
+        for _, place in sorted(candidates, key=lambda item: item[0])[:limit]:
+            correspondences = self._orb_correspondences(result, place, features)
+            if correspondences is not None:
+                self.place_best_matches = max(self.place_best_matches,
+                                              len(correspondences[0]))
+            solved = self._solve(correspondences, result, floor, timestamp_s,
+                                 place["floor"], place["pose"], check_motion=False)
+            if solved is not None:
+                self.place_best_inliers = max(self.place_best_inliers, solved[1])
+            if solved is None or solved[1] < s["place_min_inliers"]:
+                continue
+            corrected, inliers = solved
+            shift = math.hypot(corrected.x_m - pose.x_m, corrected.z_m - pose.z_m)
+            turn = abs((corrected.yaw_rad - pose.yaw_rad + math.pi) %
+                       (2 * math.pi) - math.pi)
+            if self.place_best_solution is None or inliers > self.place_best_solution["inliers"]:
+                self.place_best_solution = {
+                    "inliers": inliers, "matched_timestamp_s": place["timestamp_s"],
+                    "translation_m": shift, "yaw_deg": math.degrees(turn)}
+            max_shift = (s["place_max_relocalization_m"] if relocalizing else
+                         s["place_max_correction_m"])
+            max_turn = (180 if relocalizing else s["place_max_correction_yaw_deg"])
+            if shift > max_shift or turn > math.radians(max_turn):
+                continue
+            if best is None or inliers > best[0]:
+                best = inliers, place, corrected, shift, turn
+        if best is None:
+            self.rejection = None
+            return pose
+        inliers, place, corrected, shift, turn = best
+        if (shift < s["place_min_correction_m"] and
+                turn < math.radians(s["place_min_correction_yaw_deg"])):
+            self.rejection = None
+            return pose
+        self.loop_closure = {"matched_timestamp_s": place["timestamp_s"],
+                             "inliers": inliers, "translation_m": shift,
+                             "yaw_deg": math.degrees(turn),
+                             "epoch": place["epoch"]}
+        self.loop_count += 1
+        self.map_epoch = place["epoch"]
+        self._relocalize_until_s = -float("inf")
+        self.rejection = None
+        # Keyframes collected after the matched place may carry the drift we
+        # just corrected. Keep older anchors and rebuild recent ones in the
+        # corrected coordinate frame.
+        self._places = [saved for saved in self._places
+                        if saved["epoch"] != place["epoch"] or
+                        saved["timestamp_s"] <= place["timestamp_s"]]
+        self._last_place_s = min(self._last_place_s, place["timestamp_s"])
+        # Re-anchor visual odometry in the corrected coordinate frame. New
+        # measurements must not be attached to the old drifting anchor.
+        self._set_anchor(result, floor, corrected)
+        self._set_previous(result, floor, corrected)
+        return corrected
+
     def update(self, result, floor, timestamp_s):
         self.reset_map = False
+        self.loop_closure = None
+        self.place_candidates = 0
+        self.place_best_matches = 0
+        self.place_best_inliers = 0
+        self.place_best_solution = None
         self.inliers = 0
         self.rejection = None
         floor_bridge = False
@@ -262,18 +372,29 @@ class PoseTracker:
             return self._lost(timestamp_s, "floor_lost")
         if self._anchor is None:
             origin = Pose2D()
-            if not self._set_anchor(result, floor, origin):
+            recovering = self._ever_initialized and self._lost_since_s is not None
+            if recovering:
+                self.map_epoch += 1
+            if not self._set_anchor(result, floor, origin, timestamp_s):
+                if recovering:
+                    self.map_epoch -= 1
                 return self._lost(timestamp_s, "few_features")
             self._set_previous(result, floor, origin)
-            if self._ever_initialized and self._lost_since_s is not None:
+            if recovering:
                 self.reset_map = True
                 self.reset_count += 1
+                self._relocalize_until_s = timestamp_s + self.settings[
+                    "place_relocalization_window_s"]
             self._ever_initialized = True
             self.pose = origin
             self.tracking_ok = True
             self._last_good_s = timestamp_s
             self._lost_since_s = None
             self.method = "initialized"
+            if self._ever_initialized and len(self._places) > 1:
+                corrected = self._try_loop_closure(result, floor, origin, timestamp_s)
+                self.pose = corrected
+                return corrected
             return origin
         method = "lk"
         solved = self._solve(self._lk_correspondences(result), result, floor,
@@ -284,6 +405,8 @@ class PoseTracker:
         if solved is None:
             return self._lost(timestamp_s, "tracking_lost")
         pose, self.inliers = solved
+        if not floor_bridge and floor.fresh:
+            pose = self._try_loop_closure(result, floor, pose, timestamp_s)
         self.pose = pose
         self.tracking_ok = True
         self._last_good_s = timestamp_s
@@ -297,7 +420,7 @@ class PoseTracker:
         if not floor_bridge and floor.fresh and (
                 anchor_distance >= self.settings["keyframe_translation_m"] or
                 anchor_yaw_delta >= self.settings["keyframe_yaw_deg"]):
-            self._set_anchor(result, floor, pose)
+            self._set_anchor(result, floor, pose, timestamp_s)
         return pose
 
     def _lost(self, timestamp_s, reason):

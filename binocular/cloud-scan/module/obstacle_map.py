@@ -1,6 +1,7 @@
 """Bounded, gravity-aligned 2.5D obstacle evidence grid."""
 
 import math
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -17,7 +18,7 @@ class ObstacleMap:
     slowly and cannot erase an obstacle in one frame. No unseen ray is carved.
     """
 
-    UNKNOWN, FREE, OBSTACLE, DANGER = range(4)
+    UNKNOWN, FREE, OBSTACLE, DANGER, REMEMBERED = range(5)
 
     def __init__(self, config):
         self.settings = config["map"]
@@ -46,6 +47,61 @@ class ObstacleMap:
         self.pose = None
         self.tracking_ok = False
         self.integrated_frames = 0
+        mode = s["remembered_obstacle_mode"]
+        if mode not in ("tentative", "confirmed"):
+            raise ValueError("remembered_obstacle_mode must be tentative or confirmed")
+        if s["memory_max_cells"] < 1:
+            raise ValueError("memory_max_cells must be positive")
+        # Sparse session memory uses fixed world-cell coordinates, independent
+        # of the recentering live grid. Values are [min height, max height,
+        # last observed time, consecutive clear-ray votes].
+        self._memory_epochs = {0: OrderedDict()}
+        self._memory_epoch = 0
+        self._memory = self._memory_epochs[0]
+        self.memory_evictions = 0
+
+    @property
+    def remembered_cells(self):
+        return len(self._memory)
+
+    @property
+    def session_memory_cells(self):
+        return sum(len(memory) for memory in self._memory_epochs.values())
+
+    def reset_local(self, epoch=None):
+        """Discard a drifting live grid while retaining session memory."""
+        memories, evictions = self._memory_epochs, self.memory_evictions
+        epoch = self._memory_epoch if epoch is None else epoch
+        fresh = ObstacleMap({"map": self.settings})
+        self.__dict__.update(fresh.__dict__)
+        self._memory_epochs, self.memory_evictions = memories, evictions
+        self._memory_epoch = epoch
+        self._memory = memories.setdefault(epoch, OrderedDict())
+
+    def _memory_key(self, ix, iz):
+        return (int(round(self.origin_x_m / self.cell_m)) + int(ix),
+                int(round(self.origin_z_m / self.cell_m)) + int(iz))
+
+    def _forget_flats(self, flat):
+        for cell in np.unique(flat):
+            iz, ix = divmod(int(cell), self.side)
+            self._memory.pop(self._memory_key(ix, iz), None)
+
+    def _remember_obstacles(self, flat, timestamp_s):
+        s = self.settings
+        for cell in flat:
+            iz, ix = divmod(int(cell), self.side)
+            key = self._memory_key(ix, iz)
+            low = float(self.min_height[iz, ix])
+            high = float(self.max_height[iz, ix])
+            if key not in self._memory and self.session_memory_cells >= s["memory_max_cells"]:
+                epoch = min(
+                    (epoch for epoch, memory in self._memory_epochs.items() if memory),
+                    key=lambda item: next(iter(self._memory_epochs[item].values()))[2])
+                self._memory_epochs[epoch].popitem(last=False)
+                self.memory_evictions += 1
+            self._memory[key] = [low, high, timestamp_s, 0]
+            self._memory.move_to_end(key)
 
     def _shift(self, array, dx, dz, fill):
         shifted = np.roll(array, (-dz, -dx), axis=(-2, -1))
@@ -141,6 +197,24 @@ class ObstacleMap:
                  (ray_h >= min_h - height_margin) &
                  (ray_h <= max_h + height_margin) &
                  ~current_mask[flat])
+        # Old obstacles can outlive the live evidence grid. A measured floor
+        # ray may remove one only if it crosses the stored obstacle height on
+        # several separate frames. Multiple rays in one frame count once.
+        memory_crossed = set()
+        for cell, height in zip(flat, ray_h):
+            if current_mask[cell]:
+                continue
+            iz, ix = divmod(int(cell), self.side)
+            key = self._memory_key(ix, iz)
+            record = self._memory.get(key)
+            if (record is not None and
+                    record[0] - height_margin <= height <= record[1] + height_margin):
+                memory_crossed.add(key)
+        for key in memory_crossed:
+            record = self._memory[key]
+            record[3] += 1
+            if record[3] >= s["memory_ray_clear_frames"]:
+                del self._memory[key]
         cells = np.unique(flat[clear])
         if len(cells):
             self.hits.ravel()[cells] = np.maximum(
@@ -170,6 +244,7 @@ class ObstacleMap:
         self.max_height.ravel()[flat] = -np.inf
         self.min_height.ravel()[flat] = np.inf
         self.last_traversed.ravel()[flat] = timestamp_s
+        self._forget_flats(flat)
         return len(flat)
 
     def _suppress_flat_obstacle_fragments(self, obstacle, heights_m, rows, cols,
@@ -187,14 +262,14 @@ class ObstacleMap:
         shape = tuple((dimension + stride - 1) // stride for dimension in image_shape)
         sampled = np.zeros(shape, np.uint8)
         sampled[rows[obstacle] // stride, cols[obstacle] // stride] = 1
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(sampled, 8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(sampled, connectivity=8)
         if count <= 1:
             return obstacle
         component = labels[rows[obstacle] // stride, cols[obstacle] // stride]
         component_height = np.full(count, -np.inf, np.float32)
         component_low = np.full(count, np.inf, np.float32)
-        np.maximum.at(component_height, component, heights_m[obstacle])
-        np.minimum.at(component_low, component, heights_m[obstacle])
+        np.maximum.at(component_height, component.astype(np.intp), heights_m[obstacle])
+        np.minimum.at(component_low, component.astype(np.intp), heights_m[obstacle])
         low_flat = ((stats[:, cv2.CC_STAT_AREA] <
                      s["artifact_max_component_samples"]) &
                     (stats[:, cv2.CC_STAT_HEIGHT] <=
@@ -227,7 +302,7 @@ class ObstacleMap:
         shape = tuple((dimension + stride - 1) // stride for dimension in image_shape)
         sampled = np.zeros(shape, np.uint8)
         sampled[rows[danger] // stride, cols[danger] // stride] = 1
-        _, labels, stats, _ = cv2.connectedComponentsWithStats(sampled, 8)
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(sampled, connectivity=8)
         component = labels[rows[danger] // stride, cols[danger] // stride]
         supported = stats[:, cv2.CC_STAT_AREA] >= self.settings[
             "danger_min_component_samples"]
@@ -331,6 +406,7 @@ class ObstacleMap:
             self.danger_hits.ravel()[floor_flat[reconciled]] = 0
             self.max_height.ravel()[floor_flat[reconciled]] = -np.inf
             self.min_height.ravel()[floor_flat[reconciled]] = np.inf
+            self._forget_flats(floor_flat[reconciled])
         if len(danger_flat):
             self.danger_hits.ravel()[danger_flat] += 1
             self.floor_hits.ravel()[danger_flat] = 0
@@ -344,13 +420,22 @@ class ObstacleMap:
             floor.height_m, obs_flat)
                         if floor.fresh else 0)
         traversed_cells = self._clear_traversed_to_unknown(pose, timestamp_s, obs_flat)
+        # Store only cells that passed the live temporal and height filters.
+        height_supported = ((self.max_height.ravel()[obs_flat] >=
+                             s["obstacle_high_surface_m"]) |
+                            (self.max_height.ravel()[obs_flat] -
+                             self.min_height.ravel()[obs_flat] >=
+                             s["obstacle_min_vertical_span_m"]))
+        confirmed = obs_flat[(self.hits.ravel()[obs_flat] >=
+                              s["obstacle_evidence_required"]) & height_supported]
+        self._remember_obstacles(confirmed, timestamp_s)
         return {"integrated": True, "obstacle_cells": len(obs_flat),
                 "floor_cells": len(floor_flat), "danger_cells": len(danger_flat),
                 "far_hints": far_hints, "carved_cells": carved_cells,
                 "traversed_cells": traversed_cells}
 
     def state_grid(self):
-        """0 unknown, 1 free, 2 obstacle; 3 is an unknown drop-off warning."""
+        """Live states plus remembered obstacles in the current rolling window."""
         s = self.settings
         recent = self._recent_obstacles.sum(axis=0)
         age_ok = self._now_s - self.last_seen <= s["evidence_ttl_s"]
@@ -368,6 +453,16 @@ class ObstacleMap:
         states[free] = self.FREE
         states[obstacle] = self.OBSTACLE
         states[danger] = self.DANGER
+        if self._memory:
+            gx0 = int(round(self.origin_x_m / self.cell_m))
+            gz0 = int(round(self.origin_z_m / self.cell_m))
+            remembered_state = (self.REMEMBERED if s["remembered_obstacle_mode"] ==
+                                "tentative" else self.OBSTACLE)
+            for (gx, gz), _ in self._memory.items():
+                ix, iz = gx - gx0, gz - gz0
+                if (0 <= ix < self.side and 0 <= iz < self.side and
+                        states[iz, ix] == self.UNKNOWN):
+                    states[iz, ix] = remembered_state
         return states
 
     def cell_state(self, x_m, z_m):
@@ -375,7 +470,8 @@ class ObstacleMap:
         iz = int(math.floor((z_m - self.origin_z_m) / self.cell_m))
         if not (0 <= ix < self.side and 0 <= iz < self.side):
             return "unknown"
-        return ("unknown", "free", "obstacle", "unknown")[self.state_grid()[iz, ix]]
+        return ("unknown", "free", "obstacle", "unknown",
+                "remembered_obstacle")[self.state_grid()[iz, ix]]
 
     def walked_path_mask(self):
         """Recent tracked body footprints, separate from FREE cell evidence."""
@@ -446,5 +542,7 @@ class ObstacleMap:
                     measured_floor & (states == self.DANGER))),
                 "free": int(np.count_nonzero(region & (states == self.FREE))),
                 "obstacle": int(np.count_nonzero(region & (states == self.OBSTACLE))),
+                "remembered": int(np.count_nonzero(region & (states == self.REMEMBERED))),
                 "danger_unknown": int(np.count_nonzero(region & (states == self.DANGER))),
-                "unknown": int(np.count_nonzero(region & (states == self.UNKNOWN)))}
+                "unknown": int(np.count_nonzero(region &
+                              ((states == self.UNKNOWN) | (states == self.REMEMBERED))))}

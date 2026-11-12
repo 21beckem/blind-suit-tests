@@ -13,7 +13,7 @@ def load_config(path=None):
     for eye in ("left", "right"):
         config["images"][eye] = str((path.parent / config["images"][eye]).resolve())
     if config.get("camera", {}).get("recording") is not None:
-        config["camera"]["recording"] = str((path.parent / config["camera"]["recording"]).resolve())
+        config["camera"]["recording"] = str((path.parent / "recordings" / config["camera"]["recording"]).resolve())
     if config.get("benchmark", {}).get("output") is not None:
         config["benchmark"]["output"] = str((path.parent / config["benchmark"]["output"]).resolve())
     if config.get("map", {}).get("output_dir") is not None:

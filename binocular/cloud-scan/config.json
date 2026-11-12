@@ -4,7 +4,8 @@
     "index": 1,
     "width": 1280,
     "height": 480,
-    "rotate_180": true
+    "rotate_180": true,
+    "recording": "apartment-1"
   },
   "images": {
     "left": "img/raw_left.png",
@@ -90,6 +91,9 @@
     "free_clears_obstacle_per_frame": 0.08,
     "evidence_decay_s": 5.0,
     "evidence_ttl_s": 10.0,
+    "remembered_obstacle_mode": "tentative",
+    "memory_max_cells": 20000,
+    "memory_ray_clear_frames": 3,
     "floor_evidence_decay_s": 10.0,
     "floor_evidence_ttl_s": 12.0,
     "tracking_bucket_rows": 4,
@@ -116,6 +120,20 @@
     "keyframe_yaw_deg": 15.0,
     "tracking_reset_after_s": 2.0,
     "tracking_floor_bridge_s": 0.6,
+    "place_interval_s": 1.0,
+    "place_max_keyframes": 80,
+    "place_check_interval_s": 1.0,
+    "place_min_age_s": 15.0,
+    "place_search_radius_m": 2.0,
+    "place_search_yaw_deg": 55.0,
+    "place_max_candidates": 10,
+    "place_min_inliers": 35,
+    "place_relocalization_window_s": 3.0,
+    "place_max_relocalization_m": 6.0,
+    "place_max_correction_m": 1.0,
+    "place_max_correction_yaw_deg": 30.0,
+    "place_min_correction_m": 0.10,
+    "place_min_correction_yaw_deg": 3.0,
     "clearance_width_m": 0.8,
     "debug_interval_s": 5.0,
     "accept_min_solid_fraction": 0.05,
@@ -131,7 +149,8 @@
       "min_floor_fresh_frames": 900,
       "early_checkpoint_s": 3.0,
       "early_max_obstacle_cells": 50,
-      "early_max_danger_unknown_cells": 0
+      "early_max_danger_unknown_cells": 0,
+      "return_min_timestamp_s": 30.0
     },
     "output_dir": "stereo_out/map_runs"
   },

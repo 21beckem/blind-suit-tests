@@ -68,17 +68,17 @@ close the window even when processing fails. The depth mapper is constructed onc
 reused for every pair. Matching and confidence filtering preserve the original algorithm;
 the uncommon tuning switches, diagnostics, and alternate cloud renders have been removed.
 
-To capture a stereo recording, run `python -m module.recorded_camera_feed`
+To capture a stereo recording, run `python -m module.recorded_camera_feed -o <name>`
 from the `binocular/cloud-scan` directory. The existing default clip is at
-`cloud-scan/module/recorded_camera_feed.avi`. The live preview shows the whole stereo frame;
+`cloud-scan/recordings/apartment-1.avi`. The live preview shows the whole stereo frame;
 press Esc in that window to stop and save the recording. The window's existing Q and
-close-button controls also stop it. Use `--output path/to/capture.avi` to change the
-destination. To replay it in
+close-button controls also stop it. To replay it in
 another script, replace `from module.camera_feed import CameraFeed` with
 `from module.recorded_camera_feed import CameraFeed`; the constructor, context manager,
 `read()`, `close()`, and `split_frame()` work the same way. Playback uses the default
-file unless `camera_config["recording"]` names another recording. An optional
-`camera.recording` in JSON is resolved relative to that JSON file by `load_config()`.
+file in `camera_config["recording"]`. An optional argument to `map_live.py` can play a
+specific recording like so, `python map_live.py -recording <name>`
+`camera.recording` in JSON is resolved to be within the `recordings` folder by `load_config()`.
 Playback starts when the context manager opens; each `read()` seeks to the frame at the
 current elapsed time. Slow processing skips older frames, while repeated reads within
 one frame interval return that frame again. Reading beyond the end of the recording
@@ -133,6 +133,27 @@ obstacle remains for roughly four seconds, then becomes unknown. This reduces
 old obstacle paint during a turn while retaining short-term memory. Measured
 floor evidence fades on a 10 s time scale and expires after 12 s, so floor
 already seen before a turn remains available longer than obstacle paint.
+Confirmed obstacles are also kept in a bounded, sparse **session memory**. The
+live grid still decays as above, but remembered cells can reappear when their
+location is in the rolling window. Memory is discarded when the process ends;
+it is never written to disk. `map.remembered_obstacle_mode` is `tentative` by
+default: remembered obstacles appear amber and `cell_state()` reports
+`remembered_obstacle`, but `nearest_obstacle()` and `clearance_sectors()` do
+not count them as confirmed. Set it to `confirmed` to include them in those
+queries. `memory_max_cells` bounds the number of stored cells across tracking
+epochs; the oldest are evicted first. After a long tracking loss, each new
+local coordinate frame has separate memory until a visual return match aligns
+it with an earlier one.
+
+Visual keyframes from solid stereo depth are retained during the run. On a
+return visit, ORB feature matches and a spread-checked 3D-to-2D pose solve
+can correct accumulated X/Z/yaw drift. A successful correction resets only
+the short-lived live grid and resumes integration in the matched place's
+coordinates. Repeated solid floor observations remove remembered obstacles
+that have moved, including people; clear floor rays can also remove them when
+they cross the stored obstacle height on multiple frames. Occluded cells or
+missing depth remain remembered rather than being declared free. `metrics.json`
+records keyframe matching diagnostics, loop closures, memory size and evictions.
 
 The camera cannot see the floor immediately around its own position. A connected
 green corridor through that blind strip cannot be inferred honestly from this
@@ -166,7 +187,10 @@ is no **known** obstacle in that query, not that the corridor is known free.
 
 Camera points use OpenCV X right, Y down, Z forward. Gravity and world points use X
 right, Y up, Z forward, with the floor at Y=0. The map tracks a few local metres and
-decays stale evidence; it does not claim a global scan or labeled obstacle accuracy.
+decays live evidence; session memory is not a globally optimized scan and does
+not claim labeled obstacle accuracy. A return correction needs a distinctive,
+geometrically consistent view; it cannot be guaranteed in repetitive or
+textureless scenes.
 Tracking loss stops integration, and a long loss starts a fresh local map rather than
 joining poses across an unobserved interval.
 Visual tracking can bridge a floor dropout for up to 0.6 s using the last

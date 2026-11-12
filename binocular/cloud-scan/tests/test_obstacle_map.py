@@ -29,8 +29,9 @@ from map_offline import _fixture_checkpoint, discover_recordings, run_recording
 import map_live
 
 
-def synthetic_scene(box_z=None, pitch_deg=20.0, box_x=0.25, dropoff_m=0.0):
-    """Render exact rectified depth of a floor and optional 0.4 m high box face."""
+def synthetic_scene(box_z=None, pitch_deg=20.0, box_x=0.25, dropoff_m=0.0,
+                    box_height_m=0.4):
+    """Render exact rectified depth of a floor and optional obstacle face."""
     width, height = 320, 240
     focal, baseline, camera_height = 369.81, 0.06046, 1.1
     cx, cy = 169.03, 113.64
@@ -58,7 +59,7 @@ def synthetic_scene(box_z=None, pitch_deg=20.0, box_x=0.25, dropoff_m=0.0):
         box_x_hit = box_t * ray_grav[..., 0]
         box_y_hit = camera_height + box_t * ray_grav[..., 1]
         face = ((np.abs(box_x_hit - box_x) <= 0.18) &
-                (box_y_hit >= 0) & (box_y_hit <= 0.4) &
+                (box_y_hit >= 0) & (box_y_hit <= box_height_m) &
                 (box_t > 0) & (box_t < floor_t))
         t[face] = box_t[face]
     disparity = np.where(np.isfinite(t) & (t > 0), focal * baseline / t, 0).astype(np.float32)
@@ -460,7 +461,119 @@ class TemporalMapTests(unittest.TestCase):
         self.assertEqual(grid.cell_state(4.0, 0), "unknown")
 
 
+class SessionMemoryTests(unittest.TestCase):
+    def test_remembered_obstacle_survives_thirty_seconds_and_policy_is_configurable(self):
+        for mode in ("tentative", "confirmed"):
+            with self.subTest(mode=mode):
+                config = load_config()
+                config["map"]["remembered_obstacle_mode"] = mode
+                box, _, _ = synthetic_scene(1.5)
+                estimator = GroundPlaneEstimator(config)
+                grid = ObstacleMap(config)
+                for frame in range(3):
+                    t = frame / 25
+                    grid.integrate(box, estimator.fit(box, t), Pose2D(), t)
+                self.assertEqual(grid.cell_state(0.25, 1.5), "obstacle")
+                grid.integrate(box, estimator.fit(box, 35),
+                               Pose2D(tracking_ok=False), 35)
+                self.assertGreater(grid.remembered_cells, 0)
+                self.assertEqual(grid.cell_state(0.25, 1.5),
+                                 "remembered_obstacle" if mode == "tentative"
+                                 else "obstacle")
+
+    def test_current_view_replaces_moved_tall_obstacle(self):
+        config = load_config()
+        old_box, _, _ = synthetic_scene(1.5, box_x=0.25, box_height_m=1.7)
+        moved_box, _, _ = synthetic_scene(1.5, box_x=-0.25, box_height_m=1.7)
+        estimator = GroundPlaneEstimator(config)
+        grid = ObstacleMap(config)
+        for frame in range(3):
+            t = frame / 25
+            grid.integrate(old_box, estimator.fit(old_box, t), Pose2D(), t)
+        grid.integrate(old_box, estimator.fit(old_box, 35),
+                       Pose2D(tracking_ok=False), 35)
+        self.assertEqual(grid.cell_state(0.25, 1.5), "remembered_obstacle")
+        for frame in range(6):
+            t = 35.04 + frame / 25
+            grid.integrate(moved_box, estimator.fit(moved_box, t), Pose2D(), t)
+        self.assertEqual(grid.cell_state(0.25, 1.5), "free")
+        self.assertEqual(grid.cell_state(-0.25, 1.5), "obstacle")
+
+    def test_tracking_reset_keeps_separate_place_memories(self):
+        config = load_config()
+        box, _, _ = synthetic_scene(1.5)
+        estimator = GroundPlaneEstimator(config)
+        grid = ObstacleMap(config)
+        for frame in range(3):
+            t = frame / 25
+            grid.integrate(box, estimator.fit(box, t), Pose2D(), t)
+        old_count = grid.remembered_cells
+        grid.reset_local(epoch=1)
+        self.assertEqual(grid.remembered_cells, 0)
+        self.assertEqual(grid.cell_state(0.25, 1.5), "unknown")
+        grid.reset_local(epoch=0)
+        self.assertEqual(grid.remembered_cells, old_count)
+        self.assertEqual(grid.cell_state(0.25, 1.5), "remembered_obstacle")
+
+    def test_session_memory_cap_evicts_oldest_cells(self):
+        config = load_config()
+        config["map"]["memory_max_cells"] = 2
+        box, _, _ = synthetic_scene(1.5)
+        estimator = GroundPlaneEstimator(config)
+        grid = ObstacleMap(config)
+        for frame in range(3):
+            t = frame / 25
+            grid.integrate(box, estimator.fit(box, t), Pose2D(), t)
+        self.assertEqual(grid.session_memory_cells, 2)
+        self.assertGreater(grid.memory_evictions, 0)
+
+    def test_clear_floor_ray_removes_only_height_crossed_memory(self):
+        grid = ObstacleMap(load_config())
+        low_x, low_z = int((0.125 + 3) / 0.05), int((1.0 + 3) / 0.05)
+        tall_x, tall_z = int((0.1875 + 3) / 0.05), int((1.5 + 3) / 0.05)
+        low_key = grid._memory_key(low_x, low_z)
+        tall_key = grid._memory_key(tall_x, tall_z)
+        grid._memory[low_key] = [0.1, 0.3, 0, 0]
+        grid._memory[tall_key] = [0.2, 1.2, 0, 0]
+        for _ in range(grid.settings["memory_ray_clear_frames"]):
+            grid._carve_obstacle_rays(
+                np.array([[0.25, 0., 2.]], np.float32),
+                np.array([True]), np.array([160]), 320, Pose2D(), 1.1,
+                np.empty(0, np.int64))
+        self.assertIn(low_key, grid._memory)
+        self.assertNotIn(tall_key, grid._memory)
+
+
 class PoseTrackerTests(unittest.TestCase):
+    def test_visual_return_corrects_pose_from_old_keyframe(self):
+        config = load_config()
+        tracker = PoseTracker(config)
+        normal = np.array([0., -1., 0.])
+        floor = FloorEstimate(normal, 1.1, gravity_rotation(normal),
+                              True, True, 0, 500, 500)
+        result = panorama_frame(0)
+        self.assertTrue(tracker.update(result, floor, 0).tracking_ok)
+        drifted = Pose2D(0.3, -0.2, math.radians(7))
+        corrected = tracker._try_loop_closure(result, floor, drifted, 35.0)
+        self.assertIsNotNone(tracker.loop_closure)
+        self.assertGreaterEqual(tracker.loop_closure["inliers"],
+                                config["map"]["place_min_inliers"])
+        self.assertAlmostEqual(corrected.x_m, 0, delta=0.05)
+        self.assertAlmostEqual(corrected.z_m, 0, delta=0.05)
+        self.assertAlmostEqual(corrected.yaw_rad, 0, delta=math.radians(2))
+
+    def test_different_view_does_not_force_a_return_match(self):
+        config = load_config()
+        tracker = PoseTracker(config)
+        normal = np.array([0., -1., 0.])
+        floor = FloorEstimate(normal, 1.1, gravity_rotation(normal),
+                              True, True, 0, 500, 500)
+        self.assertTrue(tracker.update(panorama_frame(0), floor, 0).tracking_ok)
+        drifted = Pose2D(0.3, -0.2, math.radians(7))
+        checked = tracker._try_loop_closure(panorama_frame(90), floor, drifted, 35)
+        self.assertIsNone(tracker.loop_closure)
+        self.assertEqual(checked, drifted)
+
     def test_initial_floor_acquisition_is_not_a_tracking_reset(self):
         tracker = PoseTracker(load_config())
         missing = FloorEstimate(None, None, None, False, False, float("inf"), 0, 0)
@@ -603,7 +716,8 @@ class OfflineRunnerTests(unittest.TestCase):
             row = {"frame": 950, "timestamp_s": 38.0, "map_free": 900,
                    "map_obstacles": 1500, "map_danger_unknown": 250,
                    "tracking_ok": True, "reset_map": False,
-                   "floor_fresh": True}
+                   "floor_fresh": True,
+                   "loop_closure": {"matched_timestamp_s": 13.0, "inliers": 51}}
             early = {"frame": 75, "timestamp_s": 3.0, "map_free": 20,
                      "map_obstacles": 0, "map_danger_unknown": 0,
                      "tracking_ok": True, "reset_map": False,
@@ -648,7 +762,8 @@ class OfflineRunnerTests(unittest.TestCase):
                 report = run_recording(path, load_config(), output, debug_interval_s=1000)
                 self.assertEqual(report["status"], "unsuitable")
                 self.assertTrue(report["reason"])
-                saved = json.loads((output / path.stem / "metrics.json").read_text())
+                saved_path = next(output.glob(f"*{path.stem}/metrics.json"))
+                saved = json.loads(saved_path.read_text())
                 self.assertEqual(saved["status"], "unsuitable")
                 if name == "blank.avi":
                     self.assertEqual(saved["integrated_frames"], 0)

@@ -16,7 +16,7 @@ class LatestCameraFeed:
         self._feed = None
         self._condition = Condition()
         self._thread = None
-        self._latest = None
+        self._latest = (None, None, None)
         self._serial = 0
         self._returned = 0
         self._error = None
@@ -38,6 +38,8 @@ class LatestCameraFeed:
     def _capture_loop(self):
         while not self._stopping:
             try:
+                if self._feed is None:
+                    raise RuntimeError("Open LatestCameraFeed with a 'with' statement before reading")
                 left, right = self._feed.read()
                 if hasattr(self._feed, "_start_time"):
                     # Real-time recorded_camera_feed.read() can return the same

@@ -125,6 +125,13 @@ def _fixture_checkpoint(path, config, metadata, frames):
         first_tracked is not None and
         all(row["tracking_ok"] for row in frames[first_tracked:]))
     checks["fixture_no_map_reset"] = not any(row["reset_map"] for row in frames)
+    checks["fixture_return_loop_closure"] = any(
+        row.get("loop_closure") and
+        row["timestamp_s"] >= fixture["return_min_timestamp_s"] and
+        row["timestamp_s"] - row["loop_closure"]["matched_timestamp_s"] >=
+        config["map"]["place_min_age_s"] and
+        row["loop_closure"]["inliers"] >= config["map"]["place_min_inliers"]
+        for row in frames)
     checks["fixture_floor_fit_coverage"] = sum(
         row["floor_fresh"] for row in frames) >= fixture["min_floor_fresh_frames"]
     return {"matched": True, "timestamp_s": fixture["checkpoint_s"],
@@ -203,8 +210,8 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
                 start = time.perf_counter()
                 floor = ground.fit(result, timestamp_s)
                 pose = tracker.update(result, floor, timestamp_s)
-                if tracker.reset_map:
-                    grid = ObstacleMap(config)
+                if tracker.reset_map or tracker.loop_closure:
+                    grid.reset_local(tracker.map_epoch)
                 integration = grid.integrate(result, floor, pose, timestamp_s)
                 mapping_ms = (time.perf_counter() - start) * 1000
                 if integration["integrated"] and not pose.tracking_ok:
@@ -224,6 +231,12 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
                        "tracking_ok": pose.tracking_ok, "tracking_method": tracker.method,
                        "tracking_rejection": tracker.rejection,
                        "tracking_inliers": tracker.inliers, "reset_map": tracker.reset_map,
+                       "loop_closure": tracker.loop_closure,
+                       "place_keyframes": len(tracker._places),
+                       "place_candidates": tracker.place_candidates,
+                       "place_best_matches": tracker.place_best_matches,
+                       "place_best_inliers": tracker.place_best_inliers,
+                       "place_best_solution": tracker.place_best_solution,
                        "pose_x_m": pose.x_m, "pose_z_m": pose.z_m,
                        "pose_yaw_deg": float(np.rad2deg(pose.yaw_rad)),
                        "integrated": integration["integrated"],
@@ -233,6 +246,8 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
                        "traversed_cells": integration["traversed_cells"],
                        "far_hints": integration["far_hints"],
                        "map_obstacles": int(np.count_nonzero(states == grid.OBSTACLE)),
+                       "map_remembered": int(np.count_nonzero(states == grid.REMEMBERED)),
+                       "memory_cells": grid.remembered_cells,
                        "map_free": int(np.count_nonzero(states == grid.FREE)),
                        "map_danger_unknown": int(np.count_nonzero(states == grid.DANGER)),
                        "near_forward": grid.forward_coverage(
@@ -286,6 +301,9 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
         "floor_usable_frames": sum(row["floor_usable"] for row in frames),
         "tracking_ok_frames": sum(row["tracking_ok"] for row in frames),
         "tracking_resets": tracker.reset_count,
+        "loop_closures": tracker.loop_count,
+        "memory_cells": grid.remembered_cells,
+        "memory_evictions": grid.memory_evictions,
         "integrated_frames": sum(row["integrated"] for row in frames),
         "solid_fraction_mean": solid_mean,
         "weak_fraction_mean": float(np.mean([r["weak_fraction"] for r in frames])) if frames else None,
@@ -295,6 +313,7 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
         "final_cells": {"unknown": int(np.count_nonzero(states == grid.UNKNOWN)),
                         "free": int(np.count_nonzero(states == grid.FREE)),
                         "obstacle": int(np.count_nonzero(states == grid.OBSTACLE)),
+                        "remembered": int(np.count_nonzero(states == grid.REMEMBERED)),
                         "danger_unknown": int(np.count_nonzero(states == grid.DANGER))},
         "checks": checks,
         "fixture_checkpoint": fixture_checkpoint,
@@ -334,7 +353,8 @@ def main():
         reports.append({key: report.get(key) for key in
                         ("recording", "status", "reason", "frames_decoded", "duration_s",
                          "floor_fresh_frames", "tracking_ok_frames", "tracking_resets",
-                         "integrated_frames", "final_cells", "mapping_ms", "checks",
+                         "integrated_frames", "loop_closures", "memory_cells",
+                         "memory_evictions", "final_cells", "mapping_ms", "checks",
                          "suitability")})
         print(f"{Path(recording).name}: {report['status']}; "
               f"{report.get('frames_decoded', 0)} frames; {report.get('reason') or 'see metrics.json'}")

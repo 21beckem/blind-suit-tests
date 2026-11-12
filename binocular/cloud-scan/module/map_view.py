@@ -13,13 +13,16 @@ def render_map(grid, pixels_per_cell=3, fov_deg=46.0):
     """Return a BGR top-down image; forward world Z points toward image top."""
     states = grid.state_grid()
     palette = np.array([[50, 50, 50], [65, 120, 55],
-                        [40, 45, 230], [180, 40, 180]], np.uint8)
+                        [40, 45, 230], [180, 40, 180],
+                        [45, 95, 125]], np.uint8)
     image = np.flipud(palette[states])
     # A walked footprint is useful context, but it is still UNKNOWN unless
     # solid floor was measured. Hatch it in a distinct color rather than
     # turning it into a navigation-free cell.
     traversed_unknown = (states == ObstacleMap.UNKNOWN) & grid.walked_path_mask()
     rows, cols = np.indices(states.shape)
+    remembered_hatch = (states == ObstacleMap.REMEMBERED) & ((rows + cols) % 2 == 0)
+    image[np.flipud(remembered_hatch)] = (50, 50, 50)
     hatch = traversed_unknown & ((rows + cols) % 3 != 0)
     image[np.flipud(hatch)] = (115, 100, 35)
     image = cv2.resize(image, None, fx=pixels_per_cell, fy=pixels_per_cell,
@@ -36,7 +39,7 @@ def render_map(grid, pixels_per_cell=3, fov_deg=46.0):
             end = (int(round(x + length * math.sin(angle))),
                    int(round(y - length * math.cos(angle))))
             cv2.line(image, (x, y), end, color, 1, cv2.LINE_AA)
-    cv2.putText(image, "green: measured floor  teal: walked / unknown",
+    cv2.putText(image, "green: floor  teal: walked  amber: remembered",
                 (5, image.shape[0] - 8), cv2.FONT_HERSHEY_SIMPLEX,
                 0.32 * pixels_per_cell / 3, (240, 240, 240), 1, cv2.LINE_AA)
     return image
@@ -45,7 +48,7 @@ def render_map(grid, pixels_per_cell=3, fov_deg=46.0):
 class MapWindow:
     """Companion OpenCV window; does not alter DepthWindow's API."""
 
-    def __init__(self, name="Obstacle map | green: measured floor | teal: walked, unknown"):
+    def __init__(self, name="Obstacle map | green: floor | amber: remembered"):
         self.name = name
         self.is_open = False
 

@@ -20,7 +20,16 @@ else:
     from module.ui import RecordingWindow
 
 
-DEFAULT_RECORDING = Path(__file__).with_name("recorded_camera_feed.avi").resolve()
+def recording_by_name(name: str) -> Path:
+    """Return the path to a recording file in the module/recordings directory."""
+    if isinstance(name, Path):
+        return name
+    if not name:
+        raise ValueError("Recording name must be non-empty")
+    if not name.endswith(".avi"):
+        name += ".avi"
+    return (Path(__file__).parent.parent / "recordings" / name).resolve()
+
 
 
 class CameraFeed(LiveCameraFeed):
@@ -31,7 +40,7 @@ class CameraFeed(LiveCameraFeed):
     """
 
     def __enter__(self):
-        path = Path(self._config.get("recording", DEFAULT_RECORDING))
+        path = recording_by_name(self._config.get("recording"))
         self._capture = cv2.VideoCapture(str(path))
         try:
             if not self._capture.isOpened():
@@ -54,9 +63,8 @@ class CameraFeed(LiveCameraFeed):
         return super().read()
 
 
-def record_video(config, output=DEFAULT_RECORDING):
+def record_video(config, output: Path) -> Path:
     """Save whole stereo frames until the preview window is closed."""
-    output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     capture = cv2.VideoCapture(config["index"])
     writer = None
@@ -77,7 +85,7 @@ def record_video(config, output=DEFAULT_RECORDING):
                 if writer is None:
                     height, width = frame.shape[:2]
                     writer = cv2.VideoWriter(
-                        str(output), cv2.VideoWriter_fourcc(*"MJPG"), fps,
+                        str(output), cv2.VideoWriter.fourcc(*"MJPG"), fps,
                         (width, height), frame.ndim == 3,
                     )
                     if not writer.isOpened():
@@ -93,11 +101,21 @@ def record_video(config, output=DEFAULT_RECORDING):
 
 
 def main():
+    config = load_config()
+    default_recording = recording_by_name(config["camera"].get("recording"))
     parser = argparse.ArgumentParser(description="Record the side-by-side stereo camera")
-    parser.add_argument("--output", type=Path, default=DEFAULT_RECORDING,
+    parser.add_argument("-o", "--output", type=str, default=default_recording,
                         help="AVI file to write (default: in the cloud-scan directory)")
     args = parser.parse_args()
-    output = record_video(load_config()["camera"], args.output)
+
+    output_file = recording_by_name(args.output)
+    if output_file.exists():
+        answer = input(f"Recording {output_file.name} already exists. Overwrite? [y/N] ")
+        if answer.strip().lower() not in {"y", "yes"}:
+            print("Recording cancelled.")
+            return
+
+    output = record_video(config["camera"], output_file)
     print(f"Saved recording to {output}")
 
 
