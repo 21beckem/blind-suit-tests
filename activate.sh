@@ -31,13 +31,7 @@ else
 fi
 
 echo "Activating virtual environment..."
-# Activation only affects this script's shell, which is sufficient for the
-# package installation below. To keep it active in your current shell, run:
-#   source ./setup-venv.sh
 source .venv/bin/activate
 
-echo Installing missing packages...
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-
-echo "Virtual environment setup complete."
+echo Checking for missing packages...
+python requirements.py

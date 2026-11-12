@@ -12,9 +12,5 @@ if not exist .venv (
 echo Activating virtual environment...
 call .venv\Scripts\activate.bat
 
-echo Installing missing packages...
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-
-:: Keep the terminal window open if run by double-clicking
-cmd /k
+echo Checking for missing packages...
+python requirements.py

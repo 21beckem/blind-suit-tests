@@ -1,8 +1,8 @@
 # Stereo room scanner (ELP OV9281 dual-lens, Windows, CPU only)
 
 ## Setup (once)
-1. Install Python 3.10-3.12 (64-bit). Double-click `setup.bat` (creates `.venv`, installs packages, runs the self-test).
-2. Each session: `.venv\Scripts\activate.bat`
+1. Install Python 3.10-3.12 (64-bit).
+2. Each session: `activate` from the repo root (ensures `.venv`, and needed-packages are installed and activated)
 
 ## Run order
 | Step | Command | What it does |
