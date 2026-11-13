@@ -19,11 +19,12 @@ class Pose2D:
     tracking_ok: bool = True
 
 
-def sample_points(result, stride, min_range_m, max_range_m, row_start=0):
-    """Return (N,3) camera points and source rows/columns from solid pixels."""
+def sample_points(result, stride, min_range_m, max_range_m, row_start=0,
+                  min_confidence=2):
+    """Return camera points and source rows/columns above a confidence threshold."""
     if stride < 1:
         raise ValueError("sample stride must be positive")
-    mask = (result.confidence[row_start::stride, ::stride] == 2) & (
+    mask = (result.confidence[row_start::stride, ::stride] >= min_confidence) & (
         result.disparity[row_start::stride, ::stride] > 0)
     rows, cols = np.nonzero(mask)
     rows = row_start + rows * stride

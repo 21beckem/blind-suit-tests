@@ -328,8 +328,9 @@ class ObstacleMap:
                     "danger_cells": 0, "far_hints": 0, "carved_cells": 0,
                     "traversed_cells": traversed}
         s = self.settings
-        p_cam, sample_rows, cols = sample_points(result, s["sample_stride"], s["min_range_m"],
-                                       s["far_hint_range_m"])
+        p_cam, sample_rows, cols = sample_points(
+            result, s["sample_stride"], s["min_range_m"],
+            s["far_hint_range_m"], min_confidence=1)
         self._recent_obstacles[self._history_index] = 0
         self._recent_floor[self._history_index] = 0
         self._history_index = (self._history_index + 1) % len(self._recent_obstacles)
@@ -342,21 +343,23 @@ class ObstacleMap:
                     "traversed_cells": traversed}
         p_grav = camera_to_gravity(p_cam, floor.rotation_grav_cam, floor.height_m)
         h = p_grav[:, 1]
+        solid = result.confidence[sample_rows, cols] == 2
         f_times_b = float(result.Q[2, 3] / result.Q[3, 2])
         sigma_z = s["disparity_noise_px"] * p_cam[:, 2] ** 2 / f_times_b
         min_h = np.maximum(s["obstacle_min_height_m"],
                            s["obstacle_sigma_multiplier"] * sigma_z)
         trusted = p_cam[:, 2] <= s["max_range_m"]
-        obstacle = trusted & (h >= min_h) & (h <= s["obstacle_max_height_m"])
+        obstacle = solid & trusted & (h >= min_h) & (h <= s["obstacle_max_height_m"])
         obstacle = self._suppress_flat_obstacle_fragments(
             obstacle, h, sample_rows, cols, result.disparity.shape)
-        floor_point = trusted & (np.abs(h) <= s["floor_height_tol_m"])
+        floor_point = solid & trusted & (np.abs(h) <= s["floor_height_tol_m"])
+        weak_floor_point = ~solid & trusted & (np.abs(h) <= s["floor_height_tol_m"])
         danger_threshold = np.maximum(s["hole_min_below_m"],
                                       s["danger_sigma_multiplier"] * sigma_z)
-        danger = trusted & (h <= -danger_threshold)
+        danger = solid & trusted & (h <= -danger_threshold)
         danger = self._retain_supported_dropoffs(
             danger, sample_rows, cols, result.disparity.shape)
-        far_hints = int(np.count_nonzero(~trusted & (h >= min_h) &
+        far_hints = int(np.count_nonzero(solid & ~trusted & (h >= min_h) &
                                           (h <= s["obstacle_max_height_m"])))
         x_world, z_world = gravity_to_world_xz(p_grav, pose)
         ix = np.floor((x_world - self.origin_x_m) / self.cell_m).astype(np.int32)
@@ -368,11 +371,13 @@ class ObstacleMap:
         # stronger floor observation than a single boundary/noise pixel.
         floor_counts = np.bincount(flat[inside & floor_point],
                                    minlength=self.side * self.side)
-        floor_flat = np.flatnonzero(floor_counts)
+        weak_floor_counts = np.bincount(flat[inside & weak_floor_point],
+                                        minlength=self.side * self.side)
+        floor_flat = np.flatnonzero(floor_counts + weak_floor_counts)
         danger_flat = np.unique(flat[inside & danger])
         floor_flat = np.setdiff1d(floor_flat, np.union1d(obs_flat, danger_flat),
                                   assume_unique=True)
-        if len(floor_flat) < s["danger_min_floor_support_cells"]:
+        if np.count_nonzero(floor_counts[floor_flat]) < s["danger_min_floor_support_cells"]:
             danger_flat = danger_flat[:0]
         if len(obs_flat):
             raw = flat[inside & obstacle]
@@ -390,13 +395,16 @@ class ObstacleMap:
             self.floor_hits.ravel()[obs_flat] *= 0.5
         if len(floor_flat):
             dense = floor_counts[floor_flat] >= s["floor_dense_min_samples"]
+            solid_cells = floor_counts[floor_flat] > 0
             self.floor_hits.ravel()[floor_flat] += np.where(
                 dense, s["floor_evidence_per_frame"],
-                s["floor_sparse_evidence_per_frame"])
+                np.where(solid_cells, s["floor_sparse_evidence_per_frame"],
+                         s["floor_weak_evidence_per_frame"]))
             self.last_floor_seen.ravel()[floor_flat] = timestamp_s
-            self.hits.ravel()[floor_flat] = np.maximum(
-                0, self.hits.ravel()[floor_flat] - s["free_clears_obstacle_per_frame"])
-            self.danger_hits.ravel()[floor_flat] *= 0.5
+            solid_flat = floor_flat[solid_cells]
+            self.hits.ravel()[solid_flat] = np.maximum(
+                0, self.hits.ravel()[solid_flat] - s["free_clears_obstacle_per_frame"])
+            self.danger_hits.ravel()[solid_flat] *= 0.5
             slot = (self._history_index - 1) % len(self._recent_floor)
             self._recent_floor[slot].ravel()[floor_flat[dense]] = 1
             recent_floor = self._recent_floor.reshape(len(self._recent_floor), -1)[:, floor_flat].sum(axis=0)

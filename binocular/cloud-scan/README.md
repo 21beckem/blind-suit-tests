@@ -114,8 +114,11 @@ window.
 `config.json` has a `map` section for geometry, floor, evidence, tracking, suitability,
 and output thresholds. The grid is 6 m by 6 m at 5 cm per cell. The three navigation
 states are **unknown**, **free**, and **obstacle**; a below-floor warning is rendered
-separately but queried as unknown. Only confidence-2 stereo points inside the trusted
-3 m range affect geometry. Floor evidence is required for free space; weak/missing
+separately but queried as unknown. Solid confidence-2 points inside the trusted
+3 m range supply obstacle, drop-off, and primary floor evidence. Weak confidence-1
+points contribute only slow floor evidence when they agree within 5 cm of a fresh
+solid-depth floor fit; they cannot clear obstacles or carve rays. Floor evidence is
+required for free space; missing
 depth, unobserved space, the near blind zone, and tracking loss do not become free.
 Several solid floor pixels can establish a free cell in one frame. Repeated solid
 floor observations reconcile older conflicting obstacle evidence. A solid floor ray
@@ -193,6 +196,9 @@ geometrically consistent view; it cannot be guaranteed in repetitive or
 textureless scenes.
 Tracking loss stops integration, and a long loss starts a fresh local map rather than
 joining poses across an unobserved interval.
+When the normal optical-flow and ORB solves fail, tracking tries a wider optical-flow
+search with a reverse-flow consistency check and separate motion limits. Offline
+metrics retain the rejection and match count from each attempt.
 Visual tracking can bridge a floor dropout for up to 0.6 s using the last
 usable floor orientation; mapping still pauses until a fresh floor returns.
 Initial floor acquisition does not count as a map reset. The exact apartment

@@ -52,6 +52,12 @@ class PoseTracker:
         self.reset_map = False
         self.reset_count = 0
         self.rejection = None
+        self.lk_rejection = None
+        self.recovery_rejection = None
+        self.orb_rejection = None
+        self.lk_matches = 0
+        self.recovery_matches = 0
+        self.orb_matches = 0
         self._last_good_s = None
         self._lost_since_s = None
         self._last_usable_floor = None
@@ -168,14 +174,16 @@ class PoseTracker:
         self._previous_points_3d = points_3d
         return True
 
-    def _lk_correspondences(self, result):
+    def _lk_correspondences(self, result, recovery=False):
         if self._previous is None:
             return None
         source = self._previous_points_2d.reshape(-1, 1, 2)
         target, status, _ = cv2.calcOpticalFlowPyrLK(
             self._previous.gray, result.gray, source, None,
-            winSize=(self.settings["tracking_lk_window_px"],) * 2,
-            maxLevel=self.settings["tracking_lk_pyramid_levels"],
+            winSize=(self.settings["tracking_recovery_window_px"] if recovery else
+                     self.settings["tracking_lk_window_px"],) * 2,
+            maxLevel=(self.settings["tracking_recovery_pyramid_levels"] if recovery else
+                      self.settings["tracking_lk_pyramid_levels"]),
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
                       self.settings["tracking_lk_iterations"],
                       self.settings["tracking_lk_epsilon"]))
@@ -183,6 +191,21 @@ class PoseTracker:
             return None
         target = target.reshape(-1, 2)
         valid = status.ravel().astype(bool) & np.isfinite(target).all(axis=1)
+        if recovery:
+            backward, back_status, _ = cv2.calcOpticalFlowPyrLK(
+                result.gray, self._previous.gray, target.reshape(-1, 1, 2), None,
+                winSize=(self.settings["tracking_recovery_window_px"],) * 2,
+                maxLevel=self.settings["tracking_recovery_pyramid_levels"],
+                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                          self.settings["tracking_lk_iterations"],
+                          self.settings["tracking_lk_epsilon"]))
+            if backward is None:
+                return None
+            back_error = np.linalg.norm(backward.reshape(-1, 2) -
+                                        source.reshape(-1, 2), axis=1)
+            valid &= back_status.ravel().astype(bool)
+            valid &= np.isfinite(back_error)
+            valid &= back_error <= self.settings["tracking_recovery_forward_backward_px"]
         h, w = result.gray.shape
         valid &= (target[:, 0] >= 0) & (target[:, 0] < w)
         valid &= (target[:, 1] >= 0) & (target[:, 1] < h)
@@ -210,7 +233,8 @@ class PoseTracker:
         return points_3d, target, source
 
     def _solve(self, correspondences, result, floor, timestamp_s,
-               source_floor=None, source_pose=None, check_motion=True):
+               source_floor=None, source_pose=None, check_motion=True,
+               recovery=False):
         if correspondences is None:
             self.rejection = "few_matches"
             return None
@@ -223,7 +247,8 @@ class PoseTracker:
             ok, rvec, tvec, inliers = cv2.solvePnPRansac(
                 points_3d, target_2d, self._camera_matrix(result), None,
                 iterationsCount=s["tracking_ransac_iterations"],
-                reprojectionError=s["tracking_reprojection_px"],
+                reprojectionError=(s["tracking_recovery_reprojection_px"] if recovery else
+                                   s["tracking_reprojection_px"]),
                 confidence=s["tracking_ransac_confidence"], flags=cv2.SOLVEPNP_EPNP)
         except cv2.error:
             self.rejection = "pnp_error"
@@ -265,7 +290,9 @@ class PoseTracker:
                                pose.z_m - self.pose.z_m) / dt
             yaw_delta = (pose.yaw_rad - self.pose.yaw_rad + math.pi) % (2 * math.pi) - math.pi
             yaw_rate = abs(math.degrees(yaw_delta)) / dt
-            if speed > s["tracking_max_speed_m_s"] or yaw_rate > s["tracking_max_yaw_deg_s"]:
+            speed_limit = (s["tracking_recovery_max_speed_m_s"] if recovery else
+                           s["tracking_max_speed_m_s"])
+            if speed > speed_limit or yaw_rate > s["tracking_max_yaw_deg_s"]:
                 self.rejection = "implausible_motion"
                 return None
         return pose, len(inliers)
@@ -357,6 +384,12 @@ class PoseTracker:
         self.place_best_solution = None
         self.inliers = 0
         self.rejection = None
+        self.lk_rejection = None
+        self.recovery_rejection = None
+        self.orb_rejection = None
+        self.lk_matches = 0
+        self.recovery_matches = 0
+        self.orb_matches = 0
         floor_bridge = False
         if floor.usable:
             self._last_usable_floor = floor
@@ -397,14 +430,34 @@ class PoseTracker:
                 return corrected
             return origin
         method = "lk"
-        solved = self._solve(self._lk_correspondences(result), result, floor,
+        lk = self._lk_correspondences(result)
+        self.lk_matches = 0 if lk is None else len(lk[0])
+        solved = self._solve(lk, result, floor,
                              timestamp_s, self._previous_floor, self._previous_pose)
         if solved is None:
+            self.lk_rejection = self.rejection
             method = "orb"
-            solved = self._solve(self._orb_correspondences(result), result, floor, timestamp_s)
+            orb = self._orb_correspondences(result)
+            self.orb_matches = 0 if orb is None else len(orb[0])
+            solved = self._solve(orb, result, floor, timestamp_s)
+            if solved is None:
+                self.orb_rejection = self.rejection
         if solved is None:
+            recovery_lk = self._lk_correspondences(result, recovery=True)
+            self.recovery_matches = 0 if recovery_lk is None else len(recovery_lk[0])
+            solved = self._solve(recovery_lk, result, floor, timestamp_s,
+                                 self._previous_floor, self._previous_pose,
+                                 recovery=True)
+            if solved is None:
+                self.recovery_rejection = self.rejection
+            else:
+                method = "lk_recovery"
+        if solved is None:
+            self.rejection = (self.recovery_rejection or self.lk_rejection or
+                              self.orb_rejection)
             return self._lost(timestamp_s, "tracking_lost")
         pose, self.inliers = solved
+        self.rejection = None
         if not floor_bridge and floor.fresh:
             pose = self._try_loop_closure(result, floor, pose, timestamp_s)
         self.pose = pose

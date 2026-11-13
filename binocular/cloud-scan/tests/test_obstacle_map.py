@@ -260,6 +260,20 @@ class SingleFrameMapTests(unittest.TestCase):
         empty.integrate(weak, floor, Pose2D(), 0)
         self.assertTrue(np.all(empty.state_grid() == empty.UNKNOWN))
 
+    def test_repeated_weak_floor_needs_a_fresh_solid_plane(self):
+        config = load_config()
+        result, _, _ = synthetic_scene()
+        floor = GroundPlaneEstimator(config).fit(result, 0)
+        weak = DepthResult(result.disparity, np.minimum(result.confidence, 1),
+                           result.gray, result.Q, result.max_disparity)
+        grid = ObstacleMap(config)
+        for frame in range(4):
+            grid.integrate(weak, floor, Pose2D(), frame / 25)
+        self.assertEqual(np.count_nonzero(grid.state_grid() == grid.FREE), 0)
+        grid.integrate(weak, floor, Pose2D(), 4 / 25)
+        self.assertGreater(np.count_nonzero(grid.state_grid() == grid.FREE), 0)
+        self.assertEqual(np.count_nonzero(grid.state_grid() == grid.OBSTACLE), 0)
+
 
 class TemporalMapTests(unittest.TestCase):
     def test_stale_floor_does_not_paint_obstacles_or_danger(self):
