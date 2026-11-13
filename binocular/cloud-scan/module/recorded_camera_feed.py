@@ -40,7 +40,8 @@ class CameraFeed(LiveCameraFeed):
     """
 
     def __enter__(self):
-        path = recording_by_name(self._config.get("recording"))
+        recording = self._config.get("recording") or load_config()["camera"].get("recording")
+        path = recording_by_name(recording)
         self._capture = cv2.VideoCapture(str(path))
         try:
             if not self._capture.isOpened():

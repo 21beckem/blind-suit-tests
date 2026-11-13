@@ -11,7 +11,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from module.recorded_camera_feed import DEFAULT_RECORDING, CameraFeed, record_video
+from module.config import load_config
+from module.recorded_camera_feed import CameraFeed, record_video, recording_by_name
 from module.recorded_camera_feed_sequential import CameraFeed as SequentialCameraFeed
 
 
@@ -96,8 +97,14 @@ class RecordedCameraFeedTests(unittest.TestCase):
             capture.return_value.release.assert_called_once()
 
     def test_default_recording_stays_in_cloud_scan(self):
-        self.assertEqual(DEFAULT_RECORDING, Path(__file__).resolve().parents[1] / "module/recorded_camera_feed.avi")
-        self.assertTrue(DEFAULT_RECORDING.is_file())
+        default = recording_by_name(load_config()["camera"]["recording"])
+        self.assertEqual(default.parent, Path(__file__).resolve().parents[1] / "recordings")
+        self.assertTrue(default.is_file())
+        with patch("module.recorded_camera_feed.time.monotonic", return_value=0):
+            with CameraFeed({"rotate_180": False}) as feed:
+                self.assertEqual(feed.read()[0].shape, (480, 640, 3))
+        with SequentialCameraFeed({"rotate_180": False}) as feed:
+            self.assertEqual(feed.read()[0].shape, (480, 640, 3))
 
     def test_sequential_feed_never_skips_or_repeats(self):
         with tempfile.TemporaryDirectory() as directory:

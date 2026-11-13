@@ -25,6 +25,7 @@ from module.map_geometry import Pose2D
 from module.obstacle_map import ObstacleMap
 from module.pose_tracker import PoseTracker
 from module.latest_camera_feed import LatestCameraFeed
+from module.recorded_camera_feed import recording_by_name
 from map_offline import _fixture_checkpoint, discover_recordings, run_recording
 import map_live
 
@@ -743,8 +744,8 @@ class OfflineRunnerTests(unittest.TestCase):
                 path, config, {"fps": 25}, frames)["matched"])
 
     def test_discovery_and_explicit_unsuitable_reports(self):
-        self.assertIn(Path(__file__).resolve().parents[1] /
-                      "module/recorded_camera_feed.avi", discover_recordings())
+        self.assertIn(recording_by_name(load_config()["camera"]["recording"]),
+                      discover_recordings())
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "reports"

@@ -186,7 +186,8 @@ class OptionalToolsTests(unittest.TestCase):
             config = load_config(path)
             self.assertEqual(config["calibration"], str(directory / "calib.npz"))
             self.assertEqual(config["images"]["left"], str(directory / "left.png"))
-            self.assertEqual(config["camera"]["recording"], str(directory / "capture.avi"))
+            self.assertEqual(config["camera"]["recording"],
+                             str(directory / "recordings/capture.avi"))
             self.assertEqual(config["benchmark"]["output"], str(directory / "results/benchmark.json"))
 
 

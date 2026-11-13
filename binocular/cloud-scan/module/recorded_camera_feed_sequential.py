@@ -5,19 +5,19 @@ It never seeks according to processing time, so offline runs cannot skip or repe
 frames when processing is slower or faster than the recording.
 """
 
-from pathlib import Path
-
 import cv2
 
 from .camera_feed import CameraFeed as LiveCameraFeed
-from .recorded_camera_feed import DEFAULT_RECORDING
+from .config import load_config
+from .recorded_camera_feed import recording_by_name
 
 
 class CameraFeed(LiveCameraFeed):
     """Return successive left/right pairs from a saved side-by-side recording."""
 
     def __enter__(self):
-        path = Path(self._config.get("recording", DEFAULT_RECORDING))
+        recording = self._config.get("recording") or load_config()["camera"].get("recording")
+        path = recording_by_name(recording)
         self._capture = cv2.VideoCapture(str(path))
         try:
             if not self._capture.isOpened():
