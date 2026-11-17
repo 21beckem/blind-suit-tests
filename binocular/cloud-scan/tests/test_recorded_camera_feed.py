@@ -88,6 +88,45 @@ class RecordedCameraFeedTests(unittest.TestCase):
             self.assertAlmostEqual(float(after_two_seconds.mean()), 60, delta=2)
             np.testing.assert_array_equal(repeated, after_two_seconds)
 
+    def test_signed_eye_delay_pairs_distinct_source_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "offset.avi"
+            writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"MJPG"),
+                                     25, (128, 48))
+            self.assertTrue(writer.isOpened())
+            try:
+                for index in range(8):
+                    frame = np.empty((48, 128, 3), dtype=np.uint8)
+                    frame[:, :64] = index * 20
+                    frame[:, 64:] = 100 + index * 20
+                    writer.write(frame)
+            finally:
+                writer.release()
+
+            for delay, rotate, expected_left, expected_right in (
+                (2, False, 40, 100),
+                (-2, False, 0, 140),
+                (2, True, 140, 0),
+            ):
+                with self.subTest(delay=delay, rotate=rotate):
+                    config = {"recording": str(output), "rotate_180": rotate,
+                              "right_eye_delay_frames": delay}
+                    with patch("module.recorded_camera_feed.time.monotonic",
+                               side_effect=[0, 0, 7 / 25]):
+                        with CameraFeed(config) as feed:
+                            left, right = feed.read()
+                            self.assertAlmostEqual(float(left.mean()), expected_left, delta=3)
+                            self.assertAlmostEqual(float(right.mean()), expected_right, delta=3)
+                            with self.assertRaises(RuntimeError):
+                                feed.read()
+
+    def test_eye_delay_requires_integer(self):
+        for delay in (True, 1.5, "2"):
+            with self.subTest(delay=delay):
+                with self.assertRaisesRegex(ValueError, "right_eye_delay_frames"):
+                    with CameraFeed({"right_eye_delay_frames": delay}):
+                        pass
+
     def test_missing_recording_fails_and_releases_capture(self):
         with patch("module.recorded_camera_feed.cv2.VideoCapture") as capture:
             capture.return_value.isOpened.return_value = False

@@ -37,9 +37,15 @@ class CameraFeed(LiveCameraFeed):
 
     The camera config has the same required keys as the live feed. An optional
     ``recording`` path selects a file other than the default in cloud-scan/.
+    ``right_eye_delay_frames`` offsets the eyes by whole source frames: positive
+    values delay the right eye, and negative values delay the left eye.
     """
 
     def __enter__(self):
+        self._right_eye_delay_frames = self._config.get("right_eye_delay_frames", 0)
+        if (isinstance(self._right_eye_delay_frames, bool)
+                or not isinstance(self._right_eye_delay_frames, int)):
+            raise ValueError("right_eye_delay_frames must be an integer")
         recording = self._config.get("recording") or load_config()["camera"].get("recording")
         path = recording_by_name(recording)
         self._capture = cv2.VideoCapture(str(path))
@@ -59,6 +65,18 @@ class CameraFeed(LiveCameraFeed):
         if self._capture is None:
             raise RuntimeError("Open CameraFeed with a 'with' statement before reading")
         frame_index = int((time.monotonic() - self._start_time) * self._fps)
+        delay = self._right_eye_delay_frames
+        if delay == 0:
+            return self._read_at(frame_index)
+
+        # Start both eyes at valid source frames; the earlier eye runs out first.
+        left_index = frame_index + max(delay, 0)
+        right_index = frame_index + max(-delay, 0)
+        left, _ = self._read_at(left_index)
+        _, right = self._read_at(right_index)
+        return left, right
+
+    def _read_at(self, frame_index):
         if not self._capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index):
             raise RuntimeError("Could not seek within the stereo recording")
         return super().read()

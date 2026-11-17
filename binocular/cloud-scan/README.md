@@ -31,6 +31,12 @@ file from your own code. The default JSON stays in `cloud-scan/`, above `module/
   This also exchanges the positions of the original halves. After rotation, the left
   half is always treated as the left camera; there is no automatic order detection.
   This option affects camera capture only, not images loaded from disk.
+- `camera.right_eye_delay_frames`: signed whole-frame offset for real-time recording
+  replay. Positive values pair the left eye from a later source frame with the
+  right eye from an earlier one; negative values delay the left eye. For example,
+  `2` at 25 fps simulates the right eye lagging by 80 ms. `0` keeps the recorded
+  stereo pair synchronized. This setting does not affect physical capture,
+  recording, or sequential offline replay.
 - `images.left` / `right`: paths to the two images used by `image_depth.py`.
 - `depth.rectify`: true for raw frames. Set false for images that are already rectified;
   the calibration must then contain `Q`. Raw rectification uses `K1/D1/K2/D2/image_size`
@@ -84,6 +90,10 @@ current elapsed time. Slow processing skips older frames, while repeated reads w
 one frame interval return that frame again. Reading beyond the end of the recording
 raises `RuntimeError`. The full frame is saved before rotation or splitting, so
 `camera.rotate_180` behaves the same during replay.
+With a nonzero `right_eye_delay_frames`, replay starts with the earliest valid
+pair and stops when either eye reaches the end of the recording; it does not
+repeat edge frames. Both halves are split after applying `rotate_180` to each
+source frame.
 
 For deterministic offline processing, use `module.recorded_camera_feed_sequential.CameraFeed`.
 It has the same constructor, `read()`, context manager, `close()`, and `split_frame()`

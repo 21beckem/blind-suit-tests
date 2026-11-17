@@ -5,7 +5,8 @@
     "width": 1280,
     "height": 480,
     "rotate_180": true,
-    "recording": "apartment-1"
+    "recording": "apartment-1",
+    "right_eye_delay_frames": 0
   },
   "images": {
     "left": "img/raw_left.png",
