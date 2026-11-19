@@ -311,7 +311,8 @@ class ObstacleMap:
         filtered[np.flatnonzero(danger)] &= supported[component]
         return filtered
 
-    def integrate(self, result, floor, pose, timestamp_s):
+    def integrate(self, result, floor, pose, timestamp_s, sampled=None,
+                  clear_traversed=True):
         """Integrate one observation, or only advance decay when pose/floor is unsafe."""
         self._decay(timestamp_s)
         self.pose = pose
@@ -322,22 +323,27 @@ class ObstacleMap:
                     "traversed_cells": 0}
         self._recenter(pose)
         if not floor.fresh:
-            traversed = self._clear_traversed_to_unknown(
+            traversed = (self._clear_traversed_to_unknown(
                 pose, timestamp_s, np.empty(0, np.int64))
+                         if clear_traversed else 0)
             return {"integrated": False, "obstacle_cells": 0, "floor_cells": 0,
                     "danger_cells": 0, "far_hints": 0, "carved_cells": 0,
                     "traversed_cells": traversed}
         s = self.settings
-        p_cam, sample_rows, cols = sample_points(
-            result, s["sample_stride"], s["min_range_m"],
-            s["far_hint_range_m"], min_confidence=1)
+        if sampled is None:
+            p_cam, sample_rows, cols = sample_points(
+                result, s["sample_stride"], s["min_range_m"],
+                s["far_hint_range_m"], min_confidence=1)
+        else:
+            p_cam, sample_rows, cols = sampled
         self._recent_obstacles[self._history_index] = 0
         self._recent_floor[self._history_index] = 0
         self._history_index = (self._history_index + 1) % len(self._recent_obstacles)
         self.integrated_frames += 1
         if len(p_cam) == 0:
-            traversed = self._clear_traversed_to_unknown(
+            traversed = (self._clear_traversed_to_unknown(
                 pose, timestamp_s, np.empty(0, np.int64))
+                         if clear_traversed else 0)
             return {"integrated": True, "obstacle_cells": 0, "floor_cells": 0,
                     "danger_cells": 0, "far_hints": 0, "carved_cells": 0,
                     "traversed_cells": traversed}
@@ -427,7 +433,8 @@ class ObstacleMap:
             p_grav, floor_point, cols, result.disparity.shape[1], pose,
             floor.height_m, obs_flat)
                         if floor.fresh else 0)
-        traversed_cells = self._clear_traversed_to_unknown(pose, timestamp_s, obs_flat)
+        traversed_cells = (self._clear_traversed_to_unknown(
+            pose, timestamp_s, obs_flat) if clear_traversed else 0)
         # Store only cells that passed the live temporal and height filters.
         height_supported = ((self.max_height.ravel()[obs_flat] >=
                              s["obstacle_high_surface_m"]) |

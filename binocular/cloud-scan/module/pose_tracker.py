@@ -1,6 +1,7 @@
 """Short-range stereo visual odometry with strict map-integration gating."""
 
 import math
+from dataclasses import replace
 
 import cv2
 import numpy as np
@@ -282,12 +283,14 @@ class PoseTracker:
                    si * center_anchor_grav[2])
         z_world = (source_pose.z_m - si * center_anchor_grav[0] +
                    c * center_anchor_grav[2])
+        y_world = source_pose.y_m + center_anchor_grav[1]
         pose = Pose2D(float(x_world), float(z_world),
-                      float(anchor_yaw + yaw_relative), True)
+                      float(anchor_yaw + yaw_relative), True, float(y_world))
         if check_motion and self._last_good_s is not None:
             dt = max(timestamp_s - self._last_good_s, 1e-3)
-            speed = math.hypot(pose.x_m - self.pose.x_m,
-                               pose.z_m - self.pose.z_m) / dt
+            speed = math.sqrt((pose.x_m - self.pose.x_m) ** 2 +
+                              (pose.y_m - self.pose.y_m) ** 2 +
+                              (pose.z_m - self.pose.z_m) ** 2) / dt
             yaw_delta = (pose.yaw_rad - self.pose.yaw_rad + math.pi) % (2 * math.pi) - math.pi
             yaw_rate = abs(math.degrees(yaw_delta)) / dt
             speed_limit = (s["tracking_recovery_max_speed_m_s"] if recovery else
@@ -332,30 +335,37 @@ class PoseTracker:
             if solved is None or solved[1] < s["place_min_inliers"]:
                 continue
             corrected, inliers = solved
-            shift = math.hypot(corrected.x_m - pose.x_m, corrected.z_m - pose.z_m)
+            shift = math.hypot(corrected.x_m - pose.x_m,
+                               corrected.z_m - pose.z_m)
+            vertical_shift = abs(corrected.y_m - pose.y_m)
             turn = abs((corrected.yaw_rad - pose.yaw_rad + math.pi) %
                        (2 * math.pi) - math.pi)
             if self.place_best_solution is None or inliers > self.place_best_solution["inliers"]:
                 self.place_best_solution = {
                     "inliers": inliers, "matched_timestamp_s": place["timestamp_s"],
-                    "translation_m": shift, "yaw_deg": math.degrees(turn)}
+                    "translation_m": shift, "vertical_m": vertical_shift,
+                    "yaw_deg": math.degrees(turn)}
             max_shift = (s["place_max_relocalization_m"] if relocalizing else
                          s["place_max_correction_m"])
             max_turn = (180 if relocalizing else s["place_max_correction_yaw_deg"])
-            if shift > max_shift or turn > math.radians(max_turn):
+            if (shift > max_shift or
+                    vertical_shift > s["place_max_correction_y_m"] or
+                    turn > math.radians(max_turn)):
                 continue
             if best is None or inliers > best[0]:
-                best = inliers, place, corrected, shift, turn
+                best = inliers, place, corrected, shift, turn, vertical_shift
         if best is None:
             self.rejection = None
             return pose
-        inliers, place, corrected, shift, turn = best
+        inliers, place, corrected, shift, turn, vertical_shift = best
         if (shift < s["place_min_correction_m"] and
-                turn < math.radians(s["place_min_correction_yaw_deg"])):
+                turn < math.radians(s["place_min_correction_yaw_deg"]) and
+                vertical_shift < s["place_min_correction_y_m"]):
             self.rejection = None
             return pose
         self.loop_closure = {"matched_timestamp_s": place["timestamp_s"],
                              "inliers": inliers, "translation_m": shift,
+                             "vertical_m": vertical_shift,
                              "yaw_deg": math.degrees(turn),
                              "epoch": place["epoch"]}
         self.loop_count += 1
@@ -404,7 +414,7 @@ class PoseTracker:
         else:
             return self._lost(timestamp_s, "floor_lost")
         if self._anchor is None:
-            origin = Pose2D()
+            origin = Pose2D(y_m=floor.height_m)
             recovering = self._ever_initialized and self._lost_since_s is not None
             if recovering:
                 self.map_epoch += 1
@@ -484,5 +494,13 @@ class PoseTracker:
         if timestamp_s - self._lost_since_s >= self.settings["tracking_reset_after_s"]:
             self._anchor = None
             self._previous = None
-        self.pose = Pose2D(self.pose.x_m, self.pose.z_m, self.pose.yaw_rad, False)
+        self.pose = Pose2D(self.pose.x_m, self.pose.z_m, self.pose.yaw_rad,
+                           False, self.pose.y_m)
+        return self.pose
+
+    def apply_vertical_correction(self, y_m):
+        """Use a reobserved mapped surface to bound visual-odometry Y drift."""
+        self.pose = replace(self.pose, y_m=float(y_m))
+        if self._previous_pose is not None:
+            self._previous_pose = replace(self._previous_pose, y_m=float(y_m))
         return self.pose

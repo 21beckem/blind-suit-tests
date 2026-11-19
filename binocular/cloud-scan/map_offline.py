@@ -16,7 +16,7 @@ from module.depth_mapper import DepthMapper
 from module.ground_plane import GroundPlaneEstimator
 from module.image_tools import ImageTools
 from module.map_view import render_map
-from module.obstacle_map import ObstacleMap
+from module.terrain_map import TerrainMap
 from module.pose_tracker import PoseTracker
 from module.recorded_camera_feed_sequential import CameraFeed
 
@@ -169,7 +169,7 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
     depth = DepthMapper(config)
     ground = GroundPlaneEstimator(config)
     tracker = PoseTracker(config)
-    grid = ObstacleMap(config)
+    grid = TerrainMap(config)
     frames = []
     depth_times = []
     mapping_times = []
@@ -209,10 +209,20 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
                 depth_ms = (time.perf_counter() - start) * 1000
                 start = time.perf_counter()
                 floor = ground.fit(result, timestamp_s)
+                floor_ms = (time.perf_counter() - start) * 1000
+                phase_start = time.perf_counter()
                 pose = tracker.update(result, floor, timestamp_s)
+                tracking_ms = (time.perf_counter() - phase_start) * 1000
                 if tracker.reset_map or tracker.loop_closure:
                     grid.reset_local(tracker.map_epoch)
+                phase_start = time.perf_counter()
+                refined = grid.refine_pose(result, floor, pose)
+                if refined is not pose:
+                    pose = tracker.apply_vertical_correction(refined.y_m)
+                refinement_ms = (time.perf_counter() - phase_start) * 1000
+                phase_start = time.perf_counter()
                 integration = grid.integrate(result, floor, pose, timestamp_s)
+                integration_ms = (time.perf_counter() - phase_start) * 1000
                 mapping_ms = (time.perf_counter() - start) * 1000
                 if integration["integrated"] and not pose.tracking_ok:
                     safety_ok = False
@@ -244,7 +254,16 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
                        "place_best_inliers": tracker.place_best_inliers,
                        "place_best_solution": tracker.place_best_solution,
                        "pose_x_m": pose.x_m, "pose_z_m": pose.z_m,
+                       "pose_y_m": pose.y_m,
+                       "vertical_correction_m": grid.vertical_correction_m,
                        "pose_yaw_deg": float(np.rad2deg(pose.yaw_rad)),
+                       "current_level_height_m": grid.current_level_height_m,
+                       "current_level_known": grid.current_level_known,
+                       "surface_count": grid.surface_count,
+                       "candidate_surfaces": grid.last_candidates,
+                       "confirmed_steps": grid.confirmed_step_count,
+                       "surface_rejection": grid.last_rejection,
+                       "nearest_step": grid.nearest_step(),
                        "integrated": integration["integrated"],
                        "observed_obstacle_cells": integration["obstacle_cells"],
                        "observed_floor_cells": integration["floor_cells"],
@@ -256,10 +275,16 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
                        "memory_cells": grid.remembered_cells,
                        "map_free": int(np.count_nonzero(states == grid.FREE)),
                        "map_danger_unknown": int(np.count_nonzero(states == grid.DANGER)),
+                       "map_steps_up": int(np.count_nonzero(states == grid.STEP_UP)),
+                       "map_steps_down": int(np.count_nonzero(states == grid.STEP_DOWN)),
                        "near_forward": grid.forward_coverage(
                            config["map"]["near_corridor_diagnostic_length_m"],
                            config["map"]["near_corridor_diagnostic_width_m"]),
-                       "depth_ms": depth_ms, "mapping_ms": mapping_ms}
+                       "depth_ms": depth_ms, "mapping_ms": mapping_ms,
+                       "floor_ms": floor_ms, "tracking_ms": tracking_ms,
+                       "refinement_ms": refinement_ms,
+                       "integration_ms": integration_ms}
+                row["terrain_phases_ms"] = grid.phase_ms
                 frames.append(row)
                 if timestamp_s >= next_debug_s:
                     ImageTools.save(output / f"map_{index:06d}.png", render_map(grid))
@@ -297,6 +322,8 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
         "near_free_requires_floor_evidence": all(
             row["near_forward"]["free"] <=
             row["near_forward"]["floor_evidence_cells"] for row in frames),
+        "no_free_without_known_level": all(
+            row["current_level_known"] or row["map_free"] == 0 for row in frames),
     }
     if fixture_checkpoint["matched"]:
         checks.update(fixture_checkpoint["checks"])
@@ -310,16 +337,24 @@ def run_recording(path, config, output_root=None, debug_interval_s=None):
         "loop_closures": tracker.loop_count,
         "memory_cells": grid.remembered_cells,
         "memory_evictions": grid.memory_evictions,
+        "surface_count": grid.surface_count,
+        "confirmed_steps": grid.confirmed_step_count,
+        "transitions": grid.transitions(),
         "integrated_frames": sum(row["integrated"] for row in frames),
         "solid_fraction_mean": solid_mean,
         "weak_fraction_mean": float(np.mean([r["weak_fraction"] for r in frames])) if frames else None,
         "bright_fraction_mean": float(np.mean([r["bright_fraction"] for r in frames])) if frames else None,
         "floor_height_median": float(np.median(floor_heights)) if floor_heights else None,
         "depth_ms": _summary(depth_times), "mapping_ms": _summary(mapping_times),
+        "mapping_phases_ms": {name: _summary([row[name + "_ms"] for row in frames])
+                              for name in ("floor", "tracking", "refinement",
+                                           "integration")},
         "final_cells": {"unknown": int(np.count_nonzero(states == grid.UNKNOWN)),
                         "free": int(np.count_nonzero(states == grid.FREE)),
                         "obstacle": int(np.count_nonzero(states == grid.OBSTACLE)),
                         "remembered": int(np.count_nonzero(states == grid.REMEMBERED)),
+                        "steps_up": int(np.count_nonzero(states == grid.STEP_UP)),
+                        "steps_down": int(np.count_nonzero(states == grid.STEP_DOWN)),
                         "danger_unknown": int(np.count_nonzero(states == grid.DANGER))},
         "checks": checks,
         "fixture_checkpoint": fixture_checkpoint,
@@ -360,7 +395,8 @@ def main():
                         ("recording", "status", "reason", "frames_decoded", "duration_s",
                          "floor_fresh_frames", "tracking_ok_frames", "tracking_resets",
                          "integrated_frames", "loop_closures", "memory_cells",
-                         "memory_evictions", "final_cells", "mapping_ms", "checks",
+                         "memory_evictions", "surface_count", "confirmed_steps",
+                         "final_cells", "mapping_ms", "checks",
                          "suitability")})
         print(f"{Path(recording).name}: {report['status']}; "
               f"{report.get('frames_decoded', 0)} frames; {report.get('reason') or 'see metrics.json'}")

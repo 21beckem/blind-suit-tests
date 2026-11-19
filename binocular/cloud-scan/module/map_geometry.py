@@ -17,6 +17,9 @@ class Pose2D:
     z_m: float = 0.0
     yaw_rad: float = 0.0
     tracking_ok: bool = True
+    # Camera centre above the epoch's first supported ground surface.
+    # Kept last so existing positional callers retain their meaning.
+    y_m: float = 0.0
 
 
 def sample_points(result, stride, min_range_m, max_range_m, row_start=0,

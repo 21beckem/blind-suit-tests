@@ -10,7 +10,7 @@ from module.latest_camera_feed import LatestCameraFeed
 from module.recorded_camera_feed import CameraFeed, recording_by_name
 from module.camera_feed import CameraFeed as PhysicalCameraFeed
 from module.map_view import MapWindow
-from module.obstacle_map import ObstacleMap
+from module.terrain_map import TerrainMap
 from module.pose_tracker import PoseTracker
 
 
@@ -22,7 +22,7 @@ def main(
     depth = DepthMapper(config)
     ground = GroundPlaneEstimator(config)
     tracker = PoseTracker(config)
-    grid = ObstacleMap(config)
+    grid = TerrainMap(config)
     bench = Benchmark().setup("capture", "depth", "mapping", "display")
     if recorded_feed_name is not None:
         config["camera"]["recording"] = recording_by_name(recorded_feed_name)
@@ -43,6 +43,9 @@ def main(
                     pose = tracker.update(result, floor, timestamp_s)
                     if tracker.reset_map or tracker.loop_closure:
                         grid.reset_local(tracker.map_epoch)
+                    refined = grid.refine_pose(result, floor, pose)
+                    if refined is not pose:
+                        pose = tracker.apply_vertical_correction(refined.y_m)
                     grid.integrate(result, floor, pose, timestamp_s)
                 with bench.measure("display"):
                     window.update(result, grid)

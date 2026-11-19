@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 from .image_tools import ImageTools
-from .obstacle_map import ObstacleMap
+from .terrain_map import TerrainMap
 
 
 def render_map(grid, pixels_per_cell=3, fov_deg=46.0):
@@ -14,14 +14,18 @@ def render_map(grid, pixels_per_cell=3, fov_deg=46.0):
     states = grid.state_grid()
     palette = np.array([[50, 50, 50], [65, 120, 55],
                         [40, 45, 230], [180, 40, 180],
-                        [45, 95, 125]], np.uint8)
+                        [45, 95, 125], [40, 180, 240],
+                        [220, 150, 55]], np.uint8)
     image = np.flipud(palette[states])
     # A walked footprint is useful context, but it is still UNKNOWN unless
     # solid floor was measured. Hatch it in a distinct color rather than
     # turning it into a navigation-free cell.
-    traversed_unknown = (states == ObstacleMap.UNKNOWN) & grid.walked_path_mask()
+    traversed_unknown = (states == TerrainMap.UNKNOWN) & grid.walked_path_mask()
     rows, cols = np.indices(states.shape)
-    remembered_hatch = (states == ObstacleMap.REMEMBERED) & ((rows + cols) % 2 == 0)
+    if hasattr(grid, "other_surface_mask"):
+        other = grid.other_surface_mask() & (states == TerrainMap.UNKNOWN)
+        image[np.flipud(other & ((rows + cols) % 2 == 0))] = (100, 70, 100)
+    remembered_hatch = (states == TerrainMap.REMEMBERED) & ((rows + cols) % 2 == 0)
     image[np.flipud(remembered_hatch)] = (50, 50, 50)
     hatch = traversed_unknown & ((rows + cols) % 3 != 0)
     image[np.flipud(hatch)] = (115, 100, 35)
@@ -39,9 +43,14 @@ def render_map(grid, pixels_per_cell=3, fov_deg=46.0):
             end = (int(round(x + length * math.sin(angle))),
                    int(round(y - length * math.cos(angle))))
             cv2.line(image, (x, y), end, color, 1, cv2.LINE_AA)
-    cv2.putText(image, "green: floor  teal: walked  amber: remembered",
+    cv2.putText(image, "green: floor  cyan: up  orange: down  amber: remembered",
                 (5, image.shape[0] - 8), cv2.FONT_HERSHEY_SIMPLEX,
                 0.32 * pixels_per_cell / 3, (240, 240, 240), 1, cv2.LINE_AA)
+    if hasattr(grid, "current_level_height_m") and grid.current_level_height_m is not None:
+        cv2.putText(image, f"level {grid.current_level_height_m:+.2f} m  "
+                    f"steps {grid.confirmed_step_count}", (5, 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (240, 240, 240), 1,
+                    cv2.LINE_AA)
     return image
 
 

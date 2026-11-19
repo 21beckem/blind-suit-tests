@@ -63,6 +63,7 @@ file from your own code. The default JSON stays in `cloud-scan/`, above `module/
 | `module/image_tools.py` | `ImageTools.load(path)`, `load_pair(left, right)`, `save(path, image)`, `depth_image(result)` |
 | `module/ui.py` | `DepthWindow(name)`, `update(result)`, `wait_until_closed()` |
 | `module/point_cloud.py` | `PointCloud.from_depth(result)`, `downsample(voxel_size)`, `export(path)` |
+| `module/terrain_map.py` | `TerrainMap(config).integrate(result, floor, pose, timestamp_s)`; elevation and step queries |
 | `module/benchmark.py` | `Benchmark`, `setup(*names)`, `start(name)`, `stop(name)`, `measure(name)`, `display()`, `save(path)` |
 
 The depth preview scripts are `live_depth.py` and `image_depth.py`; the obstacle-map
@@ -121,10 +122,14 @@ Pass `--camera` to use the physical stereo camera. Both paths use a one-slot cap
 thread, and repeated source frames are not integrated twice. Esc or Q closes the map
 window.
 
-`config.json` has a `map` section for geometry, floor, evidence, tracking, suitability,
-and output thresholds. The grid is 6 m by 6 m at 5 cm per cell. The three navigation
-states are **unknown**, **free**, and **obstacle**; a below-floor warning is rendered
-separately but queried as unknown. Solid confidence-2 points inside the trusted
+`config.json` has a `map` section for geometry, floor, stairs, evidence, tracking,
+suitability, and output thresholds. The rolling window is 6 m by 6 m at 5 cm per
+cell. Each observed elevation has separate floor and obstacle evidence. The
+current-level navigation states are **unknown**, **free**, and **obstacle**;
+a below-floor warning is rendered separately but queried as unknown. Confirmed
+step edges are shown as up or down and counted as known hazards by distance
+queries. A step indication does not establish safe passage. Solid confidence-2
+points inside the trusted
 3 m range supply obstacle, drop-off, and primary floor evidence. Weak confidence-1
 points contribute only slow floor evidence when they agree within 5 cm of a fresh
 solid-depth floor fit; they cannot clear obstacles or carve rays. Floor evidence is
@@ -168,6 +173,18 @@ they cross the stored obstacle height on multiple frames. Occluded cells or
 missing depth remain remembered rather than being declared free. `metrics.json`
 records keyframe matching diagnostics, loop closures, memory size and evictions.
 
+`TerrainMap` groups measured horizontal patches by elevation and connects
+neighboring heights only after repeated tread, edge, and riser support.
+Unconnected patches remain provisional. A step sequence can end at an unknown
+landing when the camera cannot see farther. A lower tread without enough
+connection evidence remains a below-floor warning from the upper level.
+Floor, obstacle, traversal, and ray evidence at one height cannot clear another
+height. Old surface footprints are bounded tentative session geometry; they
+never become free without fresh floor measurements. Camera Y is anchored to
+the first supported surface in a tracking epoch and can be corrected by
+reobserving the same patch. When the current level is uncertain, free cells
+are withheld.
+
 The camera cannot see the floor immediately around its own position. A connected
 green corridor through that blind strip cannot be inferred honestly from this
 recording. The top-down viewer therefore leaves it unknown even when the person
@@ -186,12 +203,16 @@ can recover it through missing and aliased depth on tile or concrete grids when
 ordinary RANSAC fails. Large sparse, low, nearly flat grid-line aliases remain
 unknown rather than becoming obstacles or invented free cells. Initial floor
 acquisition keeps the stricter RANSAC threshold.
+After acquisition, smaller tread patches may refresh the gravity orientation
+without redefining the original height datum.
 
-`module.ground_plane.GroundPlaneEstimator.fit(result, timestamp_s)` returns the floor
-normal, camera height, gravity transform, and fresh/usable flags.
-`module.pose_tracker.PoseTracker.update(result, floor, timestamp_s)` returns world
-X/Z/yaw and a tracking flag. `module.obstacle_map.ObstacleMap` integrates the frame and
-offers `cell_state(x_m, z_m)`, `walked_path_mask()`,
+`module.ground_plane.GroundPlaneEstimator.fit(result, timestamp_s)` returns a
+reference-plane normal, camera-to-plane height, gravity transform, and
+fresh/usable flags. `module.pose_tracker.PoseTracker.update(result, floor,
+timestamp_s)` returns world X/Y/Z/yaw and a tracking flag. `TerrainMap` uses
+one `module.obstacle_map.ObstacleMap` evidence grid per observed elevation and
+offers `cell_state(x_m, z_m)`, `surface_state(x_m, z_m, height_m)`,
+`transitions()`, `nearest_step()`, `walked_path_mask()`,
 `nearest_obstacle(direction_deg, width_deg)`, `clearance_sectors()`,
 `blind_zone()`, and `tracking_ok`. The walked path is a separate layer; it does
 not change the free/obstacle/unknown state. Directions are relative to
@@ -199,7 +220,8 @@ camera forward; positive degrees point right. A `None` obstacle distance means t
 is no **known** obstacle in that query, not that the corridor is known free.
 
 Camera points use OpenCV X right, Y down, Z forward. Gravity and world points use X
-right, Y up, Z forward, with the floor at Y=0. The map tracks a few local metres and
+right, Y up, Z forward. The first supported surface in a tracking epoch is at
+Y=0; other surfaces retain their relative heights. The map tracks a few local metres and
 decays live evidence; session memory is not a globally optimized scan and does
 not claim labeled obstacle accuracy. A return correction needs a distinctive,
 geometrically consistent view; it cannot be guaranteed in repetitive or
